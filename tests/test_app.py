@@ -5,8 +5,13 @@ import pandas as pd
 
 from app import (
     DashboardError,
+    aggregate_city_ticket_table,
+    build_kpis,
     compute_default_date_range,
     extract_city_from_item,
+    filter_allowed_cities,
+    payment_method_totals,
+    revenue_by_city,
     values_to_dataframe,
 )
 
@@ -58,7 +63,7 @@ class ValuesToDataframeTest(unittest.TestCase):
 
         dataframe = values_to_dataframe(values)
 
-        self.assertEqual("SAO PAULO", dataframe.loc[0, "cidade"])
+        self.assertEqual("Sao Paulo", dataframe.loc[0, "cidade"])
 
     def test_cidade_column_overridden_by_item_derivation(self) -> None:
         values = [
@@ -74,9 +79,9 @@ class ValuesToDataframeTest(unittest.TestCase):
 
         dataframe = values_to_dataframe(values)
 
-        self.assertEqual("SAO PAULO", dataframe.loc[0, "cidade"])
+        self.assertEqual("Sao Paulo", dataframe.loc[0, "cidade"])
 
-    def test_filters_out_rows_with_non_approved_status(self) -> None:
+    def test_keeps_rows_with_non_approved_status_for_courtesy_counts(self) -> None:
         values = [
             ["Data de criacao", "Descricao", "Valor", "Status"],
             ["02/07/2026", "Pedido 1", "99,90", "approved"],
@@ -85,8 +90,7 @@ class ValuesToDataframeTest(unittest.TestCase):
 
         dataframe = values_to_dataframe(values)
 
-        self.assertEqual(1, len(dataframe))
-        self.assertEqual("Pedido 1", dataframe.iloc[0]["descricao"])
+        self.assertEqual(2, len(dataframe))
 
     def test_keeps_all_rows_when_status_column_missing(self) -> None:
         values = [
@@ -121,12 +125,12 @@ class ExtractCityFromItemTest(unittest.TestCase):
     def test_extracts_city_after_turne_seven(self) -> None:
         text = "03.01.02.023 ACESSOS EXTRAS - TURNE SEVEN SAO PAULO"
 
-        self.assertEqual("SAO PAULO", extract_city_from_item(text))
+        self.assertEqual("Sao Paulo", extract_city_from_item(text))
 
     def test_extracts_city_with_accented_turne(self) -> None:
-        text = "03.01.02.023 ACESSOS EXTRAS - TURNÊ SEVEN RIO DE JANEIRO"
+        text = "03.01.02.023 ACESSOS EXTRAS - TURNE SEVEN RIO DE JANEIRO"
 
-        self.assertEqual("RIO DE JANEIRO", extract_city_from_item(text))
+        self.assertEqual("Rio de Janeiro", extract_city_from_item(text))
 
     def test_returns_none_when_pattern_not_found(self) -> None:
         text = "Produto qualquer sem padrao de turne"
@@ -136,6 +140,102 @@ class ExtractCityFromItemTest(unittest.TestCase):
     def test_returns_none_for_empty_value(self) -> None:
         self.assertIsNone(extract_city_from_item(""))
         self.assertIsNone(extract_city_from_item(None))
+
+    def test_normalizes_common_city_variations(self) -> None:
+        self.assertEqual("Sao Paulo", extract_city_from_item("TURNE SEVEN Sao Paulo"))
+        self.assertEqual("Rio de Janeiro", extract_city_from_item("TURNE SEVEN Rio de Janiero"))
+        self.assertEqual("Belo Horizonte", extract_city_from_item("TURNE SEVEN BELO HORIZONTE"))
+
+    def test_recognizes_all_real_tour_stops_from_the_sheet(self) -> None:
+        self.assertEqual("Brasilia", extract_city_from_item("TURNE SEVEN BRASILIA"))
+        self.assertEqual("Vitoria", extract_city_from_item("TURNE SEVEN VITORIA"))
+        self.assertEqual("Florianopolis", extract_city_from_item("TURNE SEVEN FLORIANOPOLIS"))
+        self.assertEqual("Campinas", extract_city_from_item("TURNE SEVEN CAMPINAS"))
+
+
+class DashboardAggregationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        values = [
+            ["Data de criacao", "Descricao", "Valor", "Status", "Item", "Metodo de Pagamento"],
+            [
+                "02/07/2026",
+                "Pago SP",
+                "100,00",
+                "approved",
+                "TURNE SEVEN SAO PAULO",
+                "credit_card",
+            ],
+            [
+                "02/07/2026",
+                "Cortesia SP",
+                "0,00",
+                "pending",
+                "TURNE SEVEN SAO PAULO",
+                "courtesy",
+            ],
+            [
+                "03/07/2026",
+                "Pago RJ",
+                "200,00",
+                "approved",
+                "TURNE SEVEN Rio de Janiero",
+                "pix",
+            ],
+            [
+                "03/07/2026",
+                "Pendente BH",
+                "50,00",
+                "pending",
+                "TURNE SEVEN BELO HORIZONTE",
+                "pix",
+            ],
+            [
+                "03/07/2026",
+                "Cidade fora",
+                "999,00",
+                "approved",
+                "TURNE SEVEN CURITIBA",
+                "pix",
+            ],
+        ]
+        self.dataframe = filter_allowed_cities(values_to_dataframe(values))
+
+    def test_filters_to_allowed_cities_only(self) -> None:
+        self.assertEqual({"Sao Paulo", "Rio de Janeiro", "Belo Horizonte"}, set(self.dataframe["cidade"]))
+
+    def test_builds_static_kpis(self) -> None:
+        self.assertEqual(
+            {
+                "receita_total": 300.0,
+                "ingressos_pagos": 2,
+                "cortesias": 1,
+            },
+            build_kpis(self.dataframe),
+        )
+
+    def test_aggregates_city_ticket_table(self) -> None:
+        table = aggregate_city_ticket_table(self.dataframe)
+
+        self.assertEqual(
+            [
+                {"Cidade": "Rio de Janeiro", "Total": 1, "Pago": 1, "Cortesia": 0},
+                {"Cidade": "Sao Paulo", "Total": 2, "Pago": 1, "Cortesia": 1},
+                {"Cidade": "Belo Horizonte", "Total": 1, "Pago": 0, "Cortesia": 0},
+            ],
+            table.to_dict("records"),
+        )
+
+    def test_ranks_revenue_by_city_descending(self) -> None:
+        ranking = revenue_by_city(self.dataframe)
+
+        self.assertEqual(["Rio de Janeiro", "Sao Paulo"], list(ranking["Cidade"]))
+        self.assertEqual([200.0, 100.0], list(ranking["Receita"]))
+
+    def test_ranks_payment_methods_descending(self) -> None:
+        ranking = payment_method_totals(self.dataframe)
+
+        self.assertEqual(["pix", "credit_card"], list(ranking["Metodo de pagamento"]))
+        self.assertEqual([200.0, 100.0], list(ranking["Receita"]))
 
 
 if __name__ == "__main__":

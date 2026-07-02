@@ -2,17 +2,22 @@
 
 Dashboard em Streamlit para ler dados de uma planilha Google Sheets e exibir:
 
-- metricas de total de ingressos e soma de valores;
-- grafico de valor por data de criacao;
-- receita total por cidade;
-- receita por metodo de pagamento;
-- quantidade de cortesias (valor=0) por cidade;
+- metricas de receita total, ingressos pagos e cortesias;
+- grafico de receita por cidade;
+- tabela de quantidade de ingressos por cidade (total, pagos e cortesias);
+- grafico de receita por metodo de pagamento;
 - tabela detalhada;
-- filtros na barra lateral.
+- filtros na barra lateral (periodo, cidade e metodo de pagamento).
 
-Todo o dashboard considera apenas linhas com a coluna `status` igual a `approved`, quando essa
-coluna existir na planilha (linhas com outros status, como pendente ou cancelado, sao
-descartadas antes de qualquer metrica ou grafico).
+O dashboard so exibe cidades da lista `ALLOWED_CITY_NAMES` em `app.py` (as cidades oficiais da
+turne). Linhas cuja cidade nao esta nessa lista, ou onde a cidade nao pode ser identificada, sao
+descartadas antes de qualquer metrica, grafico ou tabela.
+
+Um ingresso conta como **pago** (entra em "Ingressos pagos" e nas receitas) quando a linha tem
+`status = approved` **e** `valor > 0`. Uma **cortesia** e qualquer linha com `valor = 0`,
+independente do status. Linhas com outros status (pendente, cancelado etc.) e valor maior que
+zero nao entram em nenhuma metrica de receita/pagos, mas continuam aparecendo na tabela
+detalhada.
 
 O app le a aba `Dados` da planilha configurada, valida colunas obrigatorias e usa a Google Sheets API com uma Service Account.
 
@@ -21,6 +26,7 @@ O app le a aba `Dados` da planilha configurada, valida colunas obrigatorias e us
 - Python
 - Streamlit
 - Pandas
+- Altair (graficos)
 - Google Sheets API
 - Render Starter
 
@@ -57,12 +63,15 @@ Observacoes:
 - A coluna `valor` deve conter numeros, podendo usar formato brasileiro como `1.234,56`.
 - A coluna `cidade` **nao** e lida diretamente da planilha: ela e sempre derivada do texto da
   coluna `item`, extraindo tudo que vem depois de `TURNE SEVEN ` (ou `TURNÊ SEVEN `) ate o final
-  do texto. Exemplo: `03.01.02.023 ACESSOS EXTRAS - TURNÊ SEVEN SAO PAULO` vira cidade
-  `SAO PAULO`. Se a coluna `item` nao existir, a cidade nao fica disponivel.
-- Se a coluna `status` existir, somente linhas com valor `approved` (sem diferenciar
-  maiusculas/minusculas) sao mantidas; as demais sao descartadas antes de qualquer metrica,
-  grafico ou da tabela. Sem essa coluna, todas as linhas sao consideradas normalmente.
-- Uma cortesia e qualquer linha com `valor` igual a `0`.
+  do texto, e normalizada para um nome canonico da lista `ALLOWED_CITY_NAMES` (em `app.py`).
+  Exemplo: `03.01.02.023 ACESSOS EXTRAS - TURNÊ SEVEN SAO PAULO` vira cidade `Sao Paulo`. Se o
+  texto extraido nao corresponder a nenhuma cidade conhecida, ou se a coluna `item` nao existir,
+  a linha fica sem cidade e e descartada do dashboard.
+- Para adicionar uma nova cidade a turne, inclua sua variacao normalizada (sem acento, maiuscula)
+  em `ALLOWED_CITY_NAMES` em `app.py`, apontando para o nome que deve aparecer nas telas.
+- Uma cortesia e qualquer linha com `valor` igual a `0`, independente do `status`.
+- Um ingresso so entra nas metricas/graficos de receita quando `status = approved` **e**
+  `valor > 0`.
 
 ## Variaveis de ambiente
 

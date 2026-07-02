@@ -8,6 +8,7 @@ import unicodedata
 from datetime import date
 from typing import Any
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 from google.auth.exceptions import GoogleAuthError
@@ -19,13 +20,28 @@ from googleapiclient.errors import HttpError
 DEFAULT_SPREADSHEET_ID = "1ogY8-8jjibTWu1PKcPyKHofoOEL9Hn4RLJUssG2IXao"
 DEFAULT_SHEET_NAME = "Sheet1"
 REQUIRED_COLUMNS = {"data_de_criacao", "descricao", "valor"}
-OPTIONAL_FILTER_COLUMNS = ("item", "oferta", "metodo_pagamento", "cidade")
+OPTIONAL_FILTER_COLUMNS = ("cidade", "metodo_pagamento")
 SCOPES = ("https://www.googleapis.com/auth/spreadsheets.readonly",)
 PRESET_FILTER_START_DATE = date(2026, 7, 1)
 STATUS_COLUMN = "status"
 APPROVED_STATUS = "approved"
 CITY_SOURCE_COLUMN = "item"
-CITY_PATTERN = re.compile(r"turn[eê]\s+seven\s+(.+)$", re.IGNORECASE)
+PALETTE = ["#2563eb", "#16a34a", "#f97316", "#9333ea", "#0f766e", "#e11d48"]
+ALLOWED_CITY_NAMES = {
+    "SAO PAULO": "Sao Paulo",
+    "RIO DE JANEIRO": "Rio de Janeiro",
+    "RIO DE JANIERO": "Rio de Janeiro",
+    "BELO HORIZONTE": "Belo Horizonte",
+    "CUIABA": "Cuiaba",
+    "MARINGA": "Maringa",
+    "PORTO VELHO": "Porto Velho",
+    "SALVADOR": "Salvador",
+    "FORTALEZA": "Fortaleza",
+    "BRASILIA": "Brasilia",
+    "VITORIA": "Vitoria",
+    "FLORIANOPOLIS": "Florianopolis",
+    "CAMPINAS": "Campinas",
+}
 COLUMN_ALIASES = {
     "data_criacao": "data_de_criacao",
     "created_at": "data_de_criacao",
@@ -38,6 +54,7 @@ COLUMN_ALIASES = {
     "metodo_de_pagamento": "metodo_pagamento",
     "forma_de_pagamento": "metodo_pagamento",
     "cidade": "cidade",
+    "status": "status",
 }
 DERIVED_COLUMNS = {
     "descricao": ("item", "oferta"),
@@ -143,6 +160,22 @@ def normalize_column_name(column: object) -> str:
     return COLUMN_ALIASES.get(text, text)
 
 
+def normalize_text(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+
+    text = str(value).strip()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r"[^A-Za-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip().upper()
+
+
+def canonicalize_city(value: object) -> str | None:
+    normalized = normalize_text(value)
+    return ALLOWED_CITY_NAMES.get(normalized)
+
+
 def parse_brazilian_number(value: object) -> float | None:
     if value is None or pd.isna(value):
         return None
@@ -180,29 +213,22 @@ def add_derived_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
 
 
 def extract_city_from_item(text: object) -> str | None:
-    if text is None or pd.isna(text):
+    normalized = normalize_text(text)
+    marker = "TURNE SEVEN"
+    marker_index = normalized.find(marker)
+    if marker_index < 0:
         return None
 
-    match = CITY_PATTERN.search(str(text))
-    if not match:
-        return None
-
-    city = match.group(1).strip()
-    return city or None
+    city_text = normalized[marker_index + len(marker) :].strip()
+    return canonicalize_city(city_text)
 
 
 def derive_city_column(dataframe: pd.DataFrame) -> pd.DataFrame:
     if CITY_SOURCE_COLUMN in dataframe.columns:
         dataframe["cidade"] = dataframe[CITY_SOURCE_COLUMN].apply(extract_city_from_item)
+    elif "cidade" in dataframe.columns:
+        dataframe["cidade"] = dataframe["cidade"].apply(canonicalize_city)
     return dataframe
-
-
-def filter_approved_status(dataframe: pd.DataFrame) -> pd.DataFrame:
-    if STATUS_COLUMN not in dataframe.columns:
-        return dataframe
-
-    status_values = dataframe[STATUS_COLUMN].fillna("").astype(str).str.strip().str.lower()
-    return dataframe[status_values == APPROVED_STATUS]
 
 
 def values_to_dataframe(values: list[list[str]]) -> pd.DataFrame:
@@ -246,11 +272,97 @@ def values_to_dataframe(values: list[list[str]]) -> pd.DataFrame:
     )
     dataframe["valor"] = dataframe["valor"].apply(parse_brazilian_number)
     dataframe["valor"] = pd.to_numeric(dataframe["valor"], errors="coerce")
-    dataframe = filter_approved_status(dataframe)
-    if dataframe.empty:
-        raise DashboardError("Nenhum registro com status aprovado encontrado.")
 
     return dataframe
+
+
+def filter_allowed_cities(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if "cidade" not in dataframe.columns:
+        return dataframe.iloc[0:0].copy()
+
+    filtered = dataframe[dataframe["cidade"].isin(set(ALLOWED_CITY_NAMES.values()))].copy()
+    return filtered
+
+
+def status_is_approved(dataframe: pd.DataFrame) -> pd.Series:
+    if STATUS_COLUMN not in dataframe.columns:
+        return pd.Series(False, index=dataframe.index)
+
+    return dataframe[STATUS_COLUMN].fillna("").astype(str).str.strip().str.lower() == APPROVED_STATUS
+
+
+def is_paid_ticket(dataframe: pd.DataFrame) -> pd.Series:
+    return status_is_approved(dataframe) & dataframe["valor"].fillna(0).gt(0)
+
+
+def is_courtesy_ticket(dataframe: pd.DataFrame) -> pd.Series:
+    return dataframe["valor"].fillna(-1).eq(0)
+
+
+def build_kpis(dataframe: pd.DataFrame) -> dict[str, float | int]:
+    paid_mask = is_paid_ticket(dataframe)
+    courtesy_mask = is_courtesy_ticket(dataframe)
+    return {
+        "receita_total": float(dataframe.loc[paid_mask, "valor"].sum(skipna=True)),
+        "ingressos_pagos": int(paid_mask.sum()),
+        "cortesias": int(courtesy_mask.sum()),
+    }
+
+
+def revenue_by_city(dataframe: pd.DataFrame) -> pd.DataFrame:
+    paid = dataframe[is_paid_ticket(dataframe)].dropna(subset=["cidade", "valor"])
+    if paid.empty:
+        return pd.DataFrame(columns=["Cidade", "Receita"])
+
+    return (
+        paid.groupby("cidade", as_index=False)["valor"]
+        .sum()
+        .rename(columns={"cidade": "Cidade", "valor": "Receita"})
+        .sort_values("Receita", ascending=False, kind="stable")
+        .reset_index(drop=True)
+    )
+
+
+def payment_method_totals(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if "metodo_pagamento" not in dataframe.columns:
+        return pd.DataFrame(columns=["Metodo de pagamento", "Receita"])
+
+    paid = dataframe[is_paid_ticket(dataframe)].dropna(subset=["metodo_pagamento", "valor"])
+    if paid.empty:
+        return pd.DataFrame(columns=["Metodo de pagamento", "Receita"])
+
+    return (
+        paid.groupby("metodo_pagamento", as_index=False)["valor"]
+        .sum()
+        .rename(columns={"metodo_pagamento": "Metodo de pagamento", "valor": "Receita"})
+        .sort_values("Receita", ascending=False, kind="stable")
+        .reset_index(drop=True)
+    )
+
+
+def aggregate_city_ticket_table(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if dataframe.empty or "cidade" not in dataframe.columns:
+        return pd.DataFrame(columns=["Cidade", "Total", "Pago", "Cortesia"])
+
+    rows = []
+    for city, group in dataframe.groupby("cidade", sort=False):
+        paid_mask = is_paid_ticket(group)
+        rows.append(
+            {
+                "Cidade": city,
+                "Total": int(len(group)),
+                "Pago": int(paid_mask.sum()),
+                "Cortesia": int(is_courtesy_ticket(group).sum()),
+                "_receita": float(group.loc[paid_mask, "valor"].sum(skipna=True)),
+            }
+        )
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["_receita", "Total", "Cidade"], ascending=[False, False, True], kind="stable")
+        .drop(columns=["_receita"])
+        .reset_index(drop=True)
+    )
 
 
 def sorted_options(dataframe: pd.DataFrame, column: str) -> list[str]:
@@ -296,12 +408,10 @@ def render_filters(dataframe: pd.DataFrame) -> pd.DataFrame:
         )
         if isinstance(date_range, tuple) and len(date_range) == 2:
             start_date, end_date = date_range
-            if start_date != min_date or end_date != max_date:
-                filtered = filtered[
-                    (filtered["data"].dt.date >= start_date)
-                    & (filtered["data"].dt.date <= end_date)
-                ]
-
+            filtered = filtered[
+                (filtered["data"].dt.date >= start_date)
+                & (filtered["data"].dt.date <= end_date)
+            ]
 
     for column in OPTIONAL_FILTER_COLUMNS:
         if column in dataframe.columns:
@@ -322,75 +432,65 @@ def format_brl(value: float) -> str:
 
 
 def render_metrics(dataframe: pd.DataFrame) -> None:
-    total_tickets = len(dataframe)
-    total_value = dataframe["valor"].sum(skipna=True)
+    kpis = build_kpis(dataframe)
+    col_revenue, col_paid, col_courtesy = st.columns(3)
+    col_revenue.metric("Receita total", format_brl(float(kpis["receita_total"])))
+    col_paid.metric("Ingressos pagos", f"{int(kpis['ingressos_pagos']):,}".replace(",", "."))
+    col_courtesy.metric("Cortesias", f"{int(kpis['cortesias']):,}".replace(",", "."))
 
-    col_records, col_value = st.columns(2)
-    col_records.metric("Total de ingressos", f"{total_tickets:,}".replace(",", "."))
-    col_value.metric("Soma de valores", format_brl(float(total_value)))
+
+def currency_axis() -> alt.Axis:
+    return alt.Axis(format="$,.0f", title=None)
 
 
-def render_charts(dataframe: pd.DataFrame) -> None:
-    line_chart = (
-        dataframe.dropna(subset=["data", "valor"])
-        .assign(data=lambda frame: frame["data"].dt.date)
-        .groupby("data", as_index=True)["valor"]
-        .sum()
-        .sort_index()
+def render_revenue_by_city_chart(dataframe: pd.DataFrame) -> None:
+    chart_data = revenue_by_city(dataframe)
+    st.subheader("Receita por cidade")
+    if chart_data.empty:
+        st.info("Sem receita aprovada para exibir por cidade.")
+        return
+
+    chart = (
+        alt.Chart(chart_data)
+        .mark_bar(cornerRadiusEnd=5, color=PALETTE[0])
+        .encode(
+            x=alt.X("Receita:Q", axis=currency_axis()),
+            y=alt.Y("Cidade:N", sort="-x", title=None),
+            tooltip=["Cidade:N", alt.Tooltip("Receita:Q", format=",.2f")],
+        )
+        .properties(height=max(260, 34 * len(chart_data)))
     )
-    st.subheader("Valor por data")
-    if line_chart.empty:
-        st.info("Sem datas e valores validos para exibir.")
-    else:
-        st.line_chart(line_chart, use_container_width=True)
+    st.altair_chart(chart, use_container_width=True)
 
 
-def render_breakdown_charts(dataframe: pd.DataFrame) -> None:
-    st.subheader("Receita Total por cidade")
-    if "cidade" not in dataframe.columns:
-        st.info("Coluna 'item' ausente, nao e possivel identificar a cidade.")
-    else:
-        revenue_by_city = (
-            dataframe.dropna(subset=["cidade", "valor"])
-            .groupby("cidade")["valor"]
-            .sum()
-            .sort_values(ascending=False)
+def render_city_ticket_table(dataframe: pd.DataFrame) -> None:
+    st.subheader("Quantidade por cidade")
+    table = aggregate_city_ticket_table(dataframe)
+    if table.empty:
+        st.info("Sem cidades validas para exibir.")
+        return
+
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+
+def render_payment_method_chart(dataframe: pd.DataFrame) -> None:
+    chart_data = payment_method_totals(dataframe)
+    st.subheader("Receita por metodo de pagamento")
+    if chart_data.empty:
+        st.info("Sem receita aprovada por metodo de pagamento.")
+        return
+
+    chart = (
+        alt.Chart(chart_data)
+        .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5, color=PALETTE[2])
+        .encode(
+            x=alt.X("Metodo de pagamento:N", sort="-y", title=None, axis=alt.Axis(labelAngle=-25)),
+            y=alt.Y("Receita:Q", axis=currency_axis()),
+            tooltip=["Metodo de pagamento:N", alt.Tooltip("Receita:Q", format=",.2f")],
         )
-        if revenue_by_city.empty:
-            st.info("Sem dados de cidade e valor validos para exibir.")
-        else:
-            st.bar_chart(revenue_by_city, use_container_width=True)
-
-    st.subheader("Receita por Metodo de Pagamento")
-    if "metodo_pagamento" not in dataframe.columns:
-        st.info("Coluna 'metodo_pagamento' ausente na planilha.")
-    else:
-        revenue_by_payment_method = (
-            dataframe.dropna(subset=["metodo_pagamento", "valor"])
-            .groupby("metodo_pagamento")["valor"]
-            .sum()
-            .sort_values(ascending=False)
-        )
-        if revenue_by_payment_method.empty:
-            st.info("Sem dados de metodo de pagamento e valor validos para exibir.")
-        else:
-            st.bar_chart(revenue_by_payment_method, use_container_width=True)
-
-    st.subheader("Quantidade de cortesias por cidade")
-    if "cidade" not in dataframe.columns:
-        st.info("Coluna 'item' ausente, nao e possivel identificar a cidade.")
-    else:
-        courtesies_by_city = (
-            dataframe[dataframe["valor"] == 0]
-            .dropna(subset=["cidade"])
-            .groupby("cidade")
-            .size()
-            .sort_values(ascending=False)
-        )
-        if courtesies_by_city.empty:
-            st.info("Nenhuma cortesia (valor=0) encontrada.")
-        else:
-            st.bar_chart(courtesies_by_city, use_container_width=True)
+        .properties(height=320)
+    )
+    st.altair_chart(chart, use_container_width=True)
 
 
 def render_table(dataframe: pd.DataFrame) -> None:
@@ -410,25 +510,28 @@ def load_dataframe() -> pd.DataFrame:
 
 def main() -> None:
     st.set_page_config(
-        page_title="Dashboard Google Sheets",
+        page_title="Dashboard Turne Seven",
         layout="wide",
     )
-    st.title("Dashboard Google Sheets")
+    st.title("Dashboard Turne Seven")
+    st.caption("Receita, ingressos pagos e cortesias nas cidades da turne")
 
     if st.sidebar.button("Atualizar dados", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
     try:
-        dataframe = load_dataframe()
+        dataframe = filter_allowed_cities(load_dataframe())
         filtered_dataframe = render_filters(dataframe)
         if filtered_dataframe.empty:
             st.warning("Nenhum registro encontrado para os filtros selecionados.")
             st.stop()
 
         render_metrics(filtered_dataframe)
-        render_charts(filtered_dataframe)
-        render_breakdown_charts(filtered_dataframe)
+        st.divider()
+        render_revenue_by_city_chart(filtered_dataframe)
+        render_city_ticket_table(filtered_dataframe)
+        render_payment_method_chart(filtered_dataframe)
         render_table(filtered_dataframe)
     except DashboardError as exc:
         st.error(str(exc))
@@ -441,4 +544,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
