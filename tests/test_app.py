@@ -1,8 +1,14 @@
 import unittest
+from datetime import date
 
 import pandas as pd
 
-from app import DashboardError, extract_city_from_item, values_to_dataframe
+from app import (
+    DashboardError,
+    compute_default_date_range,
+    extract_city_from_item,
+    values_to_dataframe,
+)
 
 
 class ValuesToDataframeTest(unittest.TestCase):
@@ -92,6 +98,23 @@ class ValuesToDataframeTest(unittest.TestCase):
         dataframe = values_to_dataframe(values)
 
         self.assertEqual(2, len(dataframe))
+
+
+class ComputeDefaultDateRangeTest(unittest.TestCase):
+    def test_defaults_to_preset_start_when_within_data_range(self) -> None:
+        result = compute_default_date_range(date(2026, 1, 1), date(2026, 12, 31))
+
+        self.assertEqual((date(2026, 7, 1), date(2026, 12, 31)), result)
+
+    def test_clamps_to_min_date_when_data_starts_after_preset(self) -> None:
+        result = compute_default_date_range(date(2026, 8, 1), date(2026, 12, 31))
+
+        self.assertEqual((date(2026, 8, 1), date(2026, 12, 31)), result)
+
+    def test_falls_back_to_full_range_when_all_data_before_preset(self) -> None:
+        result = compute_default_date_range(date(2025, 1, 1), date(2025, 6, 30))
+
+        self.assertEqual((date(2025, 1, 1), date(2025, 6, 30)), result)
 
 
 class ExtractCityFromItemTest(unittest.TestCase):

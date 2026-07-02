@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import unicodedata
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -20,6 +21,7 @@ DEFAULT_SHEET_NAME = "Sheet1"
 REQUIRED_COLUMNS = {"data_de_criacao", "descricao", "valor"}
 OPTIONAL_FILTER_COLUMNS = ("item", "oferta", "metodo_pagamento", "cidade")
 SCOPES = ("https://www.googleapis.com/auth/spreadsheets.readonly",)
+PRESET_FILTER_START_DATE = date(2026, 7, 1)
 STATUS_COLUMN = "status"
 APPROVED_STATUS = "approved"
 CITY_SOURCE_COLUMN = "item"
@@ -271,6 +273,12 @@ def apply_multiselect_filter(
     return dataframe[values.isin(selected_values)]
 
 
+def compute_default_date_range(min_date: date, max_date: date) -> tuple[date, date]:
+    if PRESET_FILTER_START_DATE > max_date:
+        return min_date, max_date
+    return max(PRESET_FILTER_START_DATE, min_date), max_date
+
+
 def render_filters(dataframe: pd.DataFrame) -> pd.DataFrame:
     st.sidebar.header("Filtros")
     filtered = dataframe.copy()
@@ -279,9 +287,10 @@ def render_filters(dataframe: pd.DataFrame) -> pd.DataFrame:
     if not valid_dates.empty:
         min_date = valid_dates.min().date()
         max_date = valid_dates.max().date()
+        default_start, default_end = compute_default_date_range(min_date, max_date)
         date_range = st.sidebar.date_input(
             "Periodo",
-            value=(min_date, max_date),
+            value=(default_start, default_end),
             min_value=min_date,
             max_value=max_date,
         )
