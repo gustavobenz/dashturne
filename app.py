@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
@@ -17,16 +17,14 @@ from googleapiclient.errors import HttpError
 
 DEFAULT_SPREADSHEET_ID = "1ogY8-8jjibTWu1PKcPyKHofoOEL9Hn4RLJUssG2IXao"
 DEFAULT_SHEET_NAME = "Sheet1"
-REQUIRED_COLUMNS = {"data", "categoria", "descricao", "valor"}
+REQUIRED_COLUMNS = {"data_de_criacao", "descricao", "valor"}
 OPTIONAL_FILTER_COLUMNS = ("item", "oferta", "metodo_pagamento", "cidade")
 SCOPES = ("https://www.googleapis.com/auth/spreadsheets.readonly",)
 COLUMN_ALIASES = {
-    "data_de_criacao": "data",
-    "data_criacao": "data",
-    "created_at": "data",
+    "data_criacao": "data_de_criacao",
+    "created_at": "data_de_criacao",
     "valor": "valor",
     "preco": "valor",
-    "categoria": "categoria",
     "descricao": "descricao",
     "descricao_do_item": "descricao",
     "item": "item",
@@ -36,7 +34,6 @@ COLUMN_ALIASES = {
     "cidade": "cidade",
 }
 DERIVED_COLUMNS = {
-    "categoria": ("oferta", "item"),
     "descricao": ("item", "oferta"),
 }
 
@@ -209,7 +206,7 @@ def values_to_dataframe(values: list[list[str]]) -> pd.DataFrame:
         raise DashboardError(f"Colunas obrigatorias ausentes: {missing}.")
 
     dataframe["data"] = pd.to_datetime(
-        dataframe["data"],
+        dataframe["data_de_criacao"],
         errors="coerce",
         dayfirst=True,
         format="mixed",
@@ -262,12 +259,6 @@ def render_filters(dataframe: pd.DataFrame) -> pd.DataFrame:
                     & (filtered["data"].dt.date <= end_date)
                 ]
 
-    selected_categories = st.sidebar.multiselect(
-        "Categoria",
-        options=sorted_options(dataframe, "categoria"),
-        default=[],
-    )
-    filtered = apply_multiselect_filter(filtered, "categoria", selected_categories)
 
     for column in OPTIONAL_FILTER_COLUMNS:
         if column in dataframe.columns:
@@ -297,21 +288,6 @@ def render_metrics(dataframe: pd.DataFrame) -> None:
 
 
 def render_charts(dataframe: pd.DataFrame) -> None:
-    chart_left, chart_right = st.columns(2)
-
-    category_chart = (
-        dataframe.dropna(subset=["valor"])
-        .groupby("categoria", as_index=True)["valor"]
-        .sum()
-        .sort_values(ascending=False)
-    )
-    with chart_left:
-        st.subheader("Valor por categoria")
-        if category_chart.empty:
-            st.info("Sem valores validos para exibir.")
-        else:
-            st.bar_chart(category_chart, use_container_width=True)
-
     line_chart = (
         dataframe.dropna(subset=["data", "valor"])
         .assign(data=lambda frame: frame["data"].dt.date)
@@ -319,12 +295,11 @@ def render_charts(dataframe: pd.DataFrame) -> None:
         .sum()
         .sort_index()
     )
-    with chart_right:
-        st.subheader("Valor por data")
-        if line_chart.empty:
-            st.info("Sem datas e valores validos para exibir.")
-        else:
-            st.line_chart(line_chart, use_container_width=True)
+    st.subheader("Valor por data")
+    if line_chart.empty:
+        st.info("Sem datas e valores validos para exibir.")
+    else:
+        st.line_chart(line_chart, use_container_width=True)
 
 
 def render_table(dataframe: pd.DataFrame) -> None:
