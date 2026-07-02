@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from app import DashboardError, values_to_dataframe
+from app import DashboardError, extract_city_from_item, values_to_dataframe
 
 
 class ValuesToDataframeTest(unittest.TestCase):
@@ -38,6 +38,81 @@ class ValuesToDataframeTest(unittest.TestCase):
         dataframe = values_to_dataframe(values)
 
         self.assertEqual(pd.Timestamp("2026-07-02"), dataframe.loc[0, "data"])
+
+    def test_derives_cidade_from_item_text(self) -> None:
+        values = [
+            ["Data de criacao", "Descricao", "Valor", "Item"],
+            [
+                "02/07/2026",
+                "Pedido 1",
+                "99,90",
+                "03.01.02.023 ACESSOS EXTRAS - TURNE SEVEN SAO PAULO",
+            ],
+        ]
+
+        dataframe = values_to_dataframe(values)
+
+        self.assertEqual("SAO PAULO", dataframe.loc[0, "cidade"])
+
+    def test_cidade_column_overridden_by_item_derivation(self) -> None:
+        values = [
+            ["Data de criacao", "Descricao", "Valor", "Item", "Cidade"],
+            [
+                "02/07/2026",
+                "Pedido 1",
+                "99,90",
+                "03.01.02.023 ACESSOS EXTRAS - TURNE SEVEN SAO PAULO",
+                "Cidade Errada",
+            ],
+        ]
+
+        dataframe = values_to_dataframe(values)
+
+        self.assertEqual("SAO PAULO", dataframe.loc[0, "cidade"])
+
+    def test_filters_out_rows_with_non_approved_status(self) -> None:
+        values = [
+            ["Data de criacao", "Descricao", "Valor", "Status"],
+            ["02/07/2026", "Pedido 1", "99,90", "approved"],
+            ["02/07/2026", "Pedido 2", "50,00", "pending"],
+        ]
+
+        dataframe = values_to_dataframe(values)
+
+        self.assertEqual(1, len(dataframe))
+        self.assertEqual("Pedido 1", dataframe.iloc[0]["descricao"])
+
+    def test_keeps_all_rows_when_status_column_missing(self) -> None:
+        values = [
+            ["Data de criacao", "Descricao", "Valor"],
+            ["02/07/2026", "Pedido 1", "99,90"],
+            ["02/07/2026", "Pedido 2", "50,00"],
+        ]
+
+        dataframe = values_to_dataframe(values)
+
+        self.assertEqual(2, len(dataframe))
+
+
+class ExtractCityFromItemTest(unittest.TestCase):
+    def test_extracts_city_after_turne_seven(self) -> None:
+        text = "03.01.02.023 ACESSOS EXTRAS - TURNE SEVEN SAO PAULO"
+
+        self.assertEqual("SAO PAULO", extract_city_from_item(text))
+
+    def test_extracts_city_with_accented_turne(self) -> None:
+        text = "03.01.02.023 ACESSOS EXTRAS - TURNÊ SEVEN RIO DE JANEIRO"
+
+        self.assertEqual("RIO DE JANEIRO", extract_city_from_item(text))
+
+    def test_returns_none_when_pattern_not_found(self) -> None:
+        text = "Produto qualquer sem padrao de turne"
+
+        self.assertIsNone(extract_city_from_item(text))
+
+    def test_returns_none_for_empty_value(self) -> None:
+        self.assertIsNone(extract_city_from_item(""))
+        self.assertIsNone(extract_city_from_item(None))
 
 
 if __name__ == "__main__":

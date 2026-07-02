@@ -2,10 +2,17 @@
 
 Dashboard em Streamlit para ler dados de uma planilha Google Sheets e exibir:
 
-- metricas de total de registros e soma de valores;
+- metricas de total de ingressos e soma de valores;
 - grafico de valor por data de criacao;
+- receita total por cidade;
+- receita por metodo de pagamento;
+- quantidade de cortesias (valor=0) por cidade;
 - tabela detalhada;
 - filtros na barra lateral.
+
+Todo o dashboard considera apenas linhas com a coluna `status` igual a `approved`, quando essa
+coluna existir na planilha (linhas com outros status, como pendente ou cancelado, sao
+descartadas antes de qualquer metrica ou grafico).
 
 O app le a aba `Dados` da planilha configurada, valida colunas obrigatorias e usa a Google Sheets API com uma Service Account.
 
@@ -40,6 +47,7 @@ item
 oferta
 metodo_pagamento
 cidade
+status
 ```
 
 Observacoes:
@@ -47,6 +55,14 @@ Observacoes:
 - Os nomes das colunas sao normalizados para minusculas.
 - A coluna `data_de_criacao` deve conter datas validas. Ela corresponde ao cabecalho `Data de criacao` da planilha.
 - A coluna `valor` deve conter numeros, podendo usar formato brasileiro como `1.234,56`.
+- A coluna `cidade` **nao** e lida diretamente da planilha: ela e sempre derivada do texto da
+  coluna `item`, extraindo tudo que vem depois de `TURNE SEVEN ` (ou `TURNÊ SEVEN `) ate o final
+  do texto. Exemplo: `03.01.02.023 ACESSOS EXTRAS - TURNÊ SEVEN SAO PAULO` vira cidade
+  `SAO PAULO`. Se a coluna `item` nao existir, a cidade nao fica disponivel.
+- Se a coluna `status` existir, somente linhas com valor `approved` (sem diferenciar
+  maiusculas/minusculas) sao mantidas; as demais sao descartadas antes de qualquer metrica,
+  grafico ou da tabela. Sem essa coluna, todas as linhas sao consideradas normalmente.
+- Uma cortesia e qualquer linha com `valor` igual a `0`.
 
 ## Variaveis de ambiente
 

@@ -20,6 +20,10 @@ DEFAULT_SHEET_NAME = "Sheet1"
 REQUIRED_COLUMNS = {"data_de_criacao", "descricao", "valor"}
 OPTIONAL_FILTER_COLUMNS = ("item", "oferta", "metodo_pagamento", "cidade")
 SCOPES = ("https://www.googleapis.com/auth/spreadsheets.readonly",)
+STATUS_COLUMN = "status"
+APPROVED_STATUS = "approved"
+CITY_SOURCE_COLUMN = "item"
+CITY_PATTERN = re.compile(r"turn[eê]\s+seven\s+(.+)$", re.IGNORECASE)
 COLUMN_ALIASES = {
     "data_criacao": "data_de_criacao",
     "created_at": "data_de_criacao",
@@ -173,6 +177,32 @@ def add_derived_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
     return dataframe
 
 
+def extract_city_from_item(text: object) -> str | None:
+    if text is None or pd.isna(text):
+        return None
+
+    match = CITY_PATTERN.search(str(text))
+    if not match:
+        return None
+
+    city = match.group(1).strip()
+    return city or None
+
+
+def derive_city_column(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if CITY_SOURCE_COLUMN in dataframe.columns:
+        dataframe["cidade"] = dataframe[CITY_SOURCE_COLUMN].apply(extract_city_from_item)
+    return dataframe
+
+
+def filter_approved_status(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if STATUS_COLUMN not in dataframe.columns:
+        return dataframe
+
+    status_values = dataframe[STATUS_COLUMN].fillna("").astype(str).str.strip().str.lower()
+    return dataframe[status_values == APPROVED_STATUS]
+
+
 def values_to_dataframe(values: list[list[str]]) -> pd.DataFrame:
     if not values or len(values) < 2:
         raise DashboardError(f"Planilha sem dados na aba '{DEFAULT_SHEET_NAME}'.")
@@ -200,6 +230,7 @@ def values_to_dataframe(values: list[list[str]]) -> pd.DataFrame:
         raise DashboardError(f"Planilha sem dados na aba '{DEFAULT_SHEET_NAME}'.")
 
     dataframe = add_derived_columns(dataframe)
+    dataframe = derive_city_column(dataframe)
     missing_columns = REQUIRED_COLUMNS.difference(dataframe.columns)
     if missing_columns:
         missing = ", ".join(sorted(missing_columns))
@@ -213,6 +244,9 @@ def values_to_dataframe(values: list[list[str]]) -> pd.DataFrame:
     )
     dataframe["valor"] = dataframe["valor"].apply(parse_brazilian_number)
     dataframe["valor"] = pd.to_numeric(dataframe["valor"], errors="coerce")
+    dataframe = filter_approved_status(dataframe)
+    if dataframe.empty:
+        raise DashboardError("Nenhum registro com status aprovado encontrado.")
 
     return dataframe
 
@@ -279,11 +313,11 @@ def format_brl(value: float) -> str:
 
 
 def render_metrics(dataframe: pd.DataFrame) -> None:
-    total_records = len(dataframe)
+    total_tickets = len(dataframe)
     total_value = dataframe["valor"].sum(skipna=True)
 
     col_records, col_value = st.columns(2)
-    col_records.metric("Total de registros", f"{total_records:,}".replace(",", "."))
+    col_records.metric("Total de ingressos", f"{total_tickets:,}".replace(",", "."))
     col_value.metric("Soma de valores", format_brl(float(total_value)))
 
 
@@ -300,6 +334,54 @@ def render_charts(dataframe: pd.DataFrame) -> None:
         st.info("Sem datas e valores validos para exibir.")
     else:
         st.line_chart(line_chart, use_container_width=True)
+
+
+def render_breakdown_charts(dataframe: pd.DataFrame) -> None:
+    st.subheader("Receita Total por cidade")
+    if "cidade" not in dataframe.columns:
+        st.info("Coluna 'item' ausente, nao e possivel identificar a cidade.")
+    else:
+        revenue_by_city = (
+            dataframe.dropna(subset=["cidade", "valor"])
+            .groupby("cidade")["valor"]
+            .sum()
+            .sort_values(ascending=False)
+        )
+        if revenue_by_city.empty:
+            st.info("Sem dados de cidade e valor validos para exibir.")
+        else:
+            st.bar_chart(revenue_by_city, use_container_width=True)
+
+    st.subheader("Receita por Metodo de Pagamento")
+    if "metodo_pagamento" not in dataframe.columns:
+        st.info("Coluna 'metodo_pagamento' ausente na planilha.")
+    else:
+        revenue_by_payment_method = (
+            dataframe.dropna(subset=["metodo_pagamento", "valor"])
+            .groupby("metodo_pagamento")["valor"]
+            .sum()
+            .sort_values(ascending=False)
+        )
+        if revenue_by_payment_method.empty:
+            st.info("Sem dados de metodo de pagamento e valor validos para exibir.")
+        else:
+            st.bar_chart(revenue_by_payment_method, use_container_width=True)
+
+    st.subheader("Quantidade de cortesias por cidade")
+    if "cidade" not in dataframe.columns:
+        st.info("Coluna 'item' ausente, nao e possivel identificar a cidade.")
+    else:
+        courtesies_by_city = (
+            dataframe[dataframe["valor"] == 0]
+            .dropna(subset=["cidade"])
+            .groupby("cidade")
+            .size()
+            .sort_values(ascending=False)
+        )
+        if courtesies_by_city.empty:
+            st.info("Nenhuma cortesia (valor=0) encontrada.")
+        else:
+            st.bar_chart(courtesies_by_city, use_container_width=True)
 
 
 def render_table(dataframe: pd.DataFrame) -> None:
@@ -337,6 +419,7 @@ def main() -> None:
 
         render_metrics(filtered_dataframe)
         render_charts(filtered_dataframe)
+        render_breakdown_charts(filtered_dataframe)
         render_table(filtered_dataframe)
     except DashboardError as exc:
         st.error(str(exc))
