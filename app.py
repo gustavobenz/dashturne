@@ -8,8 +8,11 @@ import unicodedata
 from datetime import date
 from typing import Any
 
-import altair as alt
+import numpy as np
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
 from google.auth.exceptions import GoogleAuthError
 from google.oauth2.service_account import Credentials
@@ -26,6 +29,7 @@ PRESET_FILTER_START_DATE = date(2026, 7, 1)
 STATUS_COLUMN = "status"
 APPROVED_STATUS = "approved"
 CITY_SOURCE_COLUMN = "item"
+OFERTA_COLUMN = "oferta"
 PALETTE = ["#2563eb", "#16a34a", "#f97316", "#9333ea", "#0f766e", "#e11d48"]
 ALLOWED_CITY_NAMES = {
     "SAO PAULO": "Sao Paulo",
@@ -59,6 +63,45 @@ COLUMN_ALIASES = {
 DERIVED_COLUMNS = {
     "descricao": ("item", "oferta"),
 }
+
+# Vendas antes desta data sao pre-venda; a partir desta data (inclusive), perpetuo.
+DATA_CORTE = date(2026, 7, 6)
+TIPO_PRE_VENDA = "Pre-venda"
+TIPO_PERPETUO = "Perpetuo"
+TIPO_VENDA_OPTIONS = ("Todas as vendas", "Apenas pre-venda", "Apenas perpetuo")
+
+# Sufixo (ja normalizado: sem acento, maiusculo, sem hifen) que faz uma venda valer 2 ingressos.
+LANCAMENTO_DUPLO_SUFIXO = "LANCAMENTO DUPLO"
+
+# So "approved" conta como venda paga. Cortesia (valor = 0) continua contando independente
+# do status, preservando o comportamento ja validado do dashboard. STATUS_VALIDOS existe
+# como ponto unico de extensao caso outros status precisem entrar na regra de venda paga.
+STATUS_VALIDOS = {APPROVED_STATUS}
+
+# Capacidade por cidade. Chaves usam os mesmos nomes canonicos (sem acento) que
+# ALLOWED_CITY_NAMES ja produz, para casar direto com a coluna "cidade" normalizada.
+CAPACIDADES = {
+    "Sao Paulo": 120,
+    "Maringa": 50,
+    "Porto Velho": 40,
+    "Cuiaba": 60,
+    "Rio de Janeiro": 60,
+    "Salvador": 60,
+    "Fortaleza": 60,
+}
+
+CONSOLIDATED_CITY_COLUMNS = [
+    "Cidade",
+    "Total de vendas",
+    "Total de ingressos",
+    "Valor total vendido",
+    "Clinicas unicas",
+    "Cortesias",
+    "Capacidade",
+    "% de ocupacao",
+]
+
+PLOTLY_TEMPLATE_NAME = "turne_seven"
 
 
 class DashboardError(Exception):
@@ -288,7 +331,10 @@ def status_is_approved(dataframe: pd.DataFrame) -> pd.Series:
     if STATUS_COLUMN not in dataframe.columns:
         return pd.Series(False, index=dataframe.index)
 
-    return dataframe[STATUS_COLUMN].fillna("").astype(str).str.strip().str.lower() == APPROVED_STATUS
+    return (
+        dataframe[STATUS_COLUMN].fillna("").astype(str).str.strip().str.lower()
+        .isin(STATUS_VALIDOS)
+    )
 
 
 def is_paid_ticket(dataframe: pd.DataFrame) -> pd.Series:
@@ -299,14 +345,104 @@ def is_courtesy_ticket(dataframe: pd.DataFrame) -> pd.Series:
     return dataframe["valor"].fillna(-1).eq(0)
 
 
-def build_kpis(dataframe: pd.DataFrame) -> dict[str, float | int]:
+def is_valid_sale(dataframe: pd.DataFrame) -> pd.Series:
+    """Venda valida = paga ou cortesia. Carrinhos abandonados/pendentes/cancelados ficam fora."""
+    return is_paid_ticket(dataframe) | is_courtesy_ticket(dataframe)
+
+
+def classificar_tipo_venda(dataframe: pd.DataFrame) -> pd.Series:
+    """Classifica cada linha como Pre-venda (antes de DATA_CORTE) ou Perpetuo (a partir dela)."""
+    datas = dataframe["data"].dt.date
+    return pd.Series(
+        np.select(
+            [datas.isna(), datas < DATA_CORTE],
+            [None, TIPO_PRE_VENDA],
+            default=TIPO_PERPETUO,
+        ),
+        index=dataframe.index,
+    )
+
+
+def oferta_e_lancamento_duplo(oferta: object) -> bool:
+    """Testa (de forma robusta a caixa/espacos/acentos) se a oferta termina em LANCAMENTO DUPLO."""
+    return normalize_text(oferta).endswith(LANCAMENTO_DUPLO_SUFIXO)
+
+
+def calcular_ingressos(dataframe: pd.DataFrame) -> pd.Series:
+    """1 ingresso por venda valida; 2 se a oferta for lancamento duplo. Vendas invalidas contam 0."""
+    valid_mask = is_valid_sale(dataframe)
+    if OFERTA_COLUMN in dataframe.columns:
+        duplo_mask = dataframe[OFERTA_COLUMN].apply(oferta_e_lancamento_duplo)
+    else:
+        duplo_mask = pd.Series(False, index=dataframe.index)
+
+    ingressos = pd.Series(1, index=dataframe.index, dtype="int64")
+    ingressos = ingressos.where(~duplo_mask, 2)
+    return ingressos.where(valid_mask, 0)
+
+
+def calcular_indicadores_gerais(dataframe: pd.DataFrame) -> dict[str, float | int]:
+    """Indicadores dos cards de topo. Total de clinicas = Total de vendas (sem coluna de comprador)."""
+    valid_mask = is_valid_sale(dataframe)
     paid_mask = is_paid_ticket(dataframe)
-    courtesy_mask = is_courtesy_ticket(dataframe)
+    total_vendas = int(valid_mask.sum())
     return {
+        "total_vendas": total_vendas,
+        "total_ingressos": int(calcular_ingressos(dataframe).sum()),
+        "total_clinicas": total_vendas,
         "receita_total": float(dataframe.loc[paid_mask, "valor"].sum(skipna=True)),
-        "ingressos_pagos": int(paid_mask.sum()),
-        "cortesias": int(courtesy_mask.sum()),
+        "cortesias": int(is_courtesy_ticket(dataframe).sum()),
     }
+
+
+def classificar_faixa_ocupacao(percentual: float | None) -> str:
+    """Faixa de ocupacao: >=90 esgotando, 60-89 saudavel, <60 atencao, sem capacidade '-'."""
+    if percentual is None or pd.isna(percentual):
+        return "-"
+    if percentual >= 90:
+        return "Esgotando"
+    if percentual >= 60:
+        return "Saudavel"
+    return "Atencao"
+
+
+def consolidar_por_cidade(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Tabela por cidade: vendas, ingressos, receita, clinicas, cortesias, capacidade e ocupacao."""
+    if dataframe.empty or "cidade" not in dataframe.columns:
+        return pd.DataFrame(columns=CONSOLIDATED_CITY_COLUMNS)
+
+    working = dataframe.copy()
+    working["_ingressos"] = calcular_ingressos(working)
+    working["_valida"] = is_valid_sale(working)
+    working["_paga"] = is_paid_ticket(working)
+    working["_cortesia"] = is_courtesy_ticket(working)
+
+    rows = []
+    for city, group in working.groupby("cidade", sort=False):
+        total_vendas = int(group["_valida"].sum())
+        total_ingressos = int(group["_ingressos"].sum())
+        if total_vendas == 0 and total_ingressos == 0:
+            continue
+
+        capacidade = CAPACIDADES.get(city)
+        ocupacao = round(total_ingressos / capacidade * 100, 1) if capacidade else None
+        rows.append(
+            {
+                "Cidade": city,
+                "Total de vendas": total_vendas,
+                "Total de ingressos": total_ingressos,
+                "Valor total vendido": float(group.loc[group["_paga"], "valor"].sum(skipna=True)),
+                "Clinicas unicas": total_vendas,
+                "Cortesias": int(group["_cortesia"].sum()),
+                "Capacidade": capacidade,
+                "% de ocupacao": ocupacao,
+            }
+        )
+
+    table = pd.DataFrame(rows, columns=CONSOLIDATED_CITY_COLUMNS)
+    return table.sort_values(
+        "% de ocupacao", ascending=False, na_position="last", kind="stable"
+    ).reset_index(drop=True)
 
 
 def revenue_by_city(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -323,6 +459,54 @@ def revenue_by_city(dataframe: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def tickets_by_city(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if dataframe.empty or "cidade" not in dataframe.columns:
+        return pd.DataFrame(columns=["Cidade", "Ingressos"])
+
+    working = dataframe.copy()
+    working["_ingressos"] = calcular_ingressos(working)
+    result = (
+        working.groupby("cidade", as_index=False)["_ingressos"]
+        .sum()
+        .rename(columns={"cidade": "Cidade", "_ingressos": "Ingressos"})
+    )
+    result = result[result["Ingressos"] > 0]
+    return result.sort_values("Ingressos", ascending=False, kind="stable").reset_index(drop=True)
+
+
+def sales_over_time(dataframe: pd.DataFrame) -> pd.DataFrame:
+    valid = dataframe[is_valid_sale(dataframe)].dropna(subset=["data"])
+    if valid.empty:
+        return pd.DataFrame(columns=["Data", "Vendas"])
+
+    working = valid.copy()
+    working["Data"] = working["data"].dt.date
+    result = working.groupby("Data", as_index=False).size().rename(columns={"size": "Vendas"})
+    return result.sort_values("Data", kind="stable").reset_index(drop=True)
+
+
+def presale_vs_perpetual_summary(dataframe: pd.DataFrame) -> pd.DataFrame:
+    if dataframe.empty:
+        return pd.DataFrame(columns=["Tipo", "Ingressos", "Receita"])
+
+    working = dataframe.copy()
+    working["_tipo"] = classificar_tipo_venda(working)
+    working["_ingressos"] = calcular_ingressos(working)
+    working["_paga"] = is_paid_ticket(working)
+
+    rows = []
+    for tipo in (TIPO_PRE_VENDA, TIPO_PERPETUO):
+        subset = working[working["_tipo"] == tipo]
+        rows.append(
+            {
+                "Tipo": tipo,
+                "Ingressos": int(subset["_ingressos"].sum()),
+                "Receita": float(subset.loc[subset["_paga"], "valor"].sum(skipna=True)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def payment_method_totals(dataframe: pd.DataFrame) -> pd.DataFrame:
     if "metodo_pagamento" not in dataframe.columns:
         return pd.DataFrame(columns=["Metodo de pagamento", "Receita"])
@@ -336,31 +520,6 @@ def payment_method_totals(dataframe: pd.DataFrame) -> pd.DataFrame:
         .sum()
         .rename(columns={"metodo_pagamento": "Metodo de pagamento", "valor": "Receita"})
         .sort_values("Receita", ascending=False, kind="stable")
-        .reset_index(drop=True)
-    )
-
-
-def aggregate_city_ticket_table(dataframe: pd.DataFrame) -> pd.DataFrame:
-    if dataframe.empty or "cidade" not in dataframe.columns:
-        return pd.DataFrame(columns=["Cidade", "Total", "Pago", "Cortesia"])
-
-    rows = []
-    for city, group in dataframe.groupby("cidade", sort=False):
-        paid_mask = is_paid_ticket(group)
-        rows.append(
-            {
-                "Cidade": city,
-                "Total": int(paid_mask.sum() + is_courtesy_ticket(group).sum()),
-                "Pago": int(paid_mask.sum()),
-                "Cortesia": int(is_courtesy_ticket(group).sum()),
-                "_receita": float(group.loc[paid_mask, "valor"].sum(skipna=True)),
-            }
-        )
-
-    return (
-        pd.DataFrame(rows)
-        .sort_values(["_receita", "Total", "Cidade"], ascending=[False, False, True], kind="stable")
-        .drop(columns=["_receita"])
         .reset_index(drop=True)
     )
 
@@ -383,6 +542,14 @@ def apply_multiselect_filter(
 
     values = dataframe[column].fillna("").astype(str).str.strip()
     return dataframe[values.isin(selected_values)]
+
+
+def apply_sale_type_filter(dataframe: pd.DataFrame, selected: str) -> pd.DataFrame:
+    if selected == "Apenas pre-venda":
+        return dataframe[classificar_tipo_venda(dataframe) == TIPO_PRE_VENDA]
+    if selected == "Apenas perpetuo":
+        return dataframe[classificar_tipo_venda(dataframe) == TIPO_PERPETUO]
+    return dataframe
 
 
 def compute_default_date_range(min_date: date, max_date: date) -> tuple[date, date]:
@@ -413,6 +580,9 @@ def render_filters(dataframe: pd.DataFrame) -> pd.DataFrame:
                 & (filtered["data"].dt.date <= end_date)
             ]
 
+    tipo_venda_selecionado = st.sidebar.selectbox("Tipo de venda", TIPO_VENDA_OPTIONS, index=0)
+    filtered = apply_sale_type_filter(filtered, tipo_venda_selecionado)
+
     for column in OPTIONAL_FILTER_COLUMNS:
         if column in dataframe.columns:
             label = column.replace("_", " ").title()
@@ -431,16 +601,117 @@ def format_brl(value: float) -> str:
     return f"R$ {formatted}"
 
 
+def format_int_ptbr(value: int) -> str:
+    return f"{int(value):,}".replace(",", ".")
+
+
+CUSTOM_CSS = """
+<style>
+:root {
+    --ts-accent: #2563eb;
+    --ts-surface: rgba(37, 99, 235, 0.06);
+    --ts-border: rgba(15, 23, 42, 0.10);
+    --ts-text-muted: #64748b;
+    --ts-text-strong: #0f172a;
+}
+@media (prefers-color-scheme: dark) {
+    :root {
+        --ts-surface: rgba(37, 99, 235, 0.16);
+        --ts-border: rgba(148, 163, 184, 0.20);
+        --ts-text-muted: #94a3b8;
+        --ts-text-strong: #f1f5f9;
+    }
+}
+.block-container {
+    padding-top: 2.2rem;
+    padding-bottom: 3rem;
+}
+.ts-kpi-card {
+    background: var(--ts-surface);
+    border: 1px solid var(--ts-border);
+    border-radius: 14px;
+    padding: 1.05rem 1.2rem;
+    height: 100%;
+}
+.ts-kpi-card .ts-kpi-icon {
+    font-size: 1.25rem;
+    opacity: 0.85;
+}
+.ts-kpi-card .ts-kpi-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--ts-text-muted);
+    margin-top: 0.3rem;
+}
+.ts-kpi-card .ts-kpi-value {
+    font-size: 1.85rem;
+    font-weight: 700;
+    color: var(--ts-text-strong);
+    line-height: 1.15;
+    margin-top: 0.1rem;
+}
+.ts-caption {
+    color: var(--ts-text-muted);
+    font-size: 0.85rem;
+}
+h1, h2, h3 {
+    font-weight: 700;
+}
+</style>
+"""
+
+
+def render_custom_css() -> None:
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+def render_kpi_card(column: Any, label: str, value: str, icon: str = "") -> None:
+    column.markdown(
+        f"""
+        <div class="ts-kpi-card">
+            <div class="ts-kpi-icon">{icon}</div>
+            <div class="ts-kpi-label">{label}</div>
+            <div class="ts-kpi-value">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def render_metrics(dataframe: pd.DataFrame) -> None:
-    kpis = build_kpis(dataframe)
-    col_revenue, col_paid, col_courtesy = st.columns(3)
-    col_revenue.metric("Receita total", format_brl(float(kpis["receita_total"])))
-    col_paid.metric("Ingressos pagos", f"{int(kpis['ingressos_pagos']):,}".replace(",", "."))
-    col_courtesy.metric("Cortesias", f"{int(kpis['cortesias']):,}".replace(",", "."))
+    indicadores = calcular_indicadores_gerais(dataframe)
+    columns = st.columns(5)
+    render_kpi_card(columns[0], "Total de vendas", format_int_ptbr(indicadores["total_vendas"]), "\U0001F4CB")
+    render_kpi_card(columns[1], "Total de ingressos", format_int_ptbr(indicadores["total_ingressos"]), "\U0001F3AB")
+    render_kpi_card(columns[2], "Total de clinicas", format_int_ptbr(indicadores["total_clinicas"]), "\U0001F3E5")
+    render_kpi_card(columns[3], "Receita total", format_brl(float(indicadores["receita_total"])), "\U0001F4B0")
+    render_kpi_card(columns[4], "Cortesias", format_int_ptbr(indicadores["cortesias"]), "\U0001F39F")
+    st.caption(
+        "Total de clinicas ainda equivale ao total de vendas: a planilha nao tem uma "
+        "coluna de comprador/clinica para deduplicar."
+    )
 
 
-def currency_axis() -> alt.Axis:
-    return alt.Axis(format="$,.0f", title=None)
+def register_plotly_template() -> None:
+    template = go.layout.Template()
+    template.layout = go.Layout(
+        colorway=PALETTE,
+        font=dict(family="Segoe UI, -apple-system, sans-serif", size=13, color="#334155"),
+        title=dict(font=dict(size=16, color="#0f172a")),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=40, b=10),
+        xaxis=dict(showgrid=False, zeroline=False, showline=True, linecolor="rgba(148,163,184,0.35)"),
+        yaxis=dict(showgrid=True, gridcolor="rgba(148,163,184,0.16)", zeroline=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hoverlabel=dict(bgcolor="white", font_size=12, font_family="Segoe UI, sans-serif"),
+    )
+    pio.templates[PLOTLY_TEMPLATE_NAME] = template
+
+
+register_plotly_template()
 
 
 def render_revenue_by_city_chart(dataframe: pd.DataFrame) -> None:
@@ -450,27 +721,111 @@ def render_revenue_by_city_chart(dataframe: pd.DataFrame) -> None:
         st.info("Sem receita aprovada para exibir por cidade.")
         return
 
-    chart = (
-        alt.Chart(chart_data)
-        .mark_bar(cornerRadiusEnd=5, color=PALETTE[0])
-        .encode(
-            x=alt.X("Receita:Q", axis=currency_axis()),
-            y=alt.Y("Cidade:N", sort="-x", title=None),
-            tooltip=["Cidade:N", alt.Tooltip("Receita:Q", format=",.2f")],
-        )
-        .properties(height=max(260, 34 * len(chart_data)))
+    chart_data = chart_data.sort_values("Receita", ascending=True)
+    chart_data["_label"] = chart_data["Receita"].apply(format_brl)
+    fig = px.bar(
+        chart_data,
+        x="Receita",
+        y="Cidade",
+        orientation="h",
+        template=PLOTLY_TEMPLATE_NAME,
+        color_discrete_sequence=[PALETTE[0]],
+        custom_data=["_label"],
     )
-    st.altair_chart(chart, use_container_width=True)
+    fig.update_traces(hovertemplate="%{y}<br>%{customdata[0]}<extra></extra>")
+    fig.update_layout(
+        height=max(280, 40 * len(chart_data)),
+        xaxis_title=None,
+        yaxis_title=None,
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
-def render_city_ticket_table(dataframe: pd.DataFrame) -> None:
-    st.subheader("Quantidade por cidade")
-    table = aggregate_city_ticket_table(dataframe)
-    if table.empty:
-        st.info("Sem cidades validas para exibir.")
+def render_tickets_by_city_chart(dataframe: pd.DataFrame) -> None:
+    chart_data = tickets_by_city(dataframe)
+    st.subheader("Ingressos por cidade")
+    if chart_data.empty:
+        st.info("Sem ingressos para exibir por cidade.")
         return
 
-    st.dataframe(table, use_container_width=True, hide_index=True)
+    chart_data = chart_data.sort_values("Ingressos", ascending=True)
+    chart_data["_label"] = chart_data["Ingressos"].apply(format_int_ptbr)
+    fig = px.bar(
+        chart_data,
+        x="Ingressos",
+        y="Cidade",
+        orientation="h",
+        template=PLOTLY_TEMPLATE_NAME,
+        color_discrete_sequence=[PALETTE[1]],
+        custom_data=["_label"],
+    )
+    fig.update_traces(hovertemplate="%{y}<br>%{customdata[0]} ingressos<extra></extra>")
+    fig.update_layout(
+        height=max(280, 40 * len(chart_data)),
+        xaxis_title=None,
+        yaxis_title=None,
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_sales_over_time_chart(dataframe: pd.DataFrame) -> None:
+    chart_data = sales_over_time(dataframe)
+    st.subheader("Evolucao de vendas")
+    if chart_data.empty:
+        st.info("Sem vendas para exibir na linha do tempo.")
+        return
+
+    fig = px.line(
+        chart_data,
+        x="Data",
+        y="Vendas",
+        template=PLOTLY_TEMPLATE_NAME,
+        color_discrete_sequence=[PALETTE[0]],
+        markers=True,
+    )
+    fig.update_traces(hovertemplate="%{x|%d/%m/%Y}<br>%{y} vendas<extra></extra>")
+
+    min_data = chart_data["Data"].min()
+    max_data = chart_data["Data"].max()
+    if min_data <= DATA_CORTE <= max_data:
+        fig.add_vline(x=DATA_CORTE, line_dash="dash", line_color=PALETTE[3])
+        fig.add_annotation(
+            x=DATA_CORTE,
+            y=1,
+            yref="paper",
+            showarrow=False,
+            text="Corte perpetuo (06/07)",
+            font=dict(size=11, color=PALETTE[3]),
+            yanchor="bottom",
+        )
+
+    fig.update_layout(xaxis_title=None, yaxis_title=None, showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_presale_vs_perpetual_chart(dataframe: pd.DataFrame) -> None:
+    summary = presale_vs_perpetual_summary(dataframe)
+    st.subheader("Pre-venda vs Perpetuo")
+    if summary.empty or summary["Ingressos"].sum() == 0:
+        st.info("Sem vendas para comparar pre-venda e perpetuo.")
+        return
+
+    summary = summary.copy()
+    summary["_label"] = summary["Receita"].apply(format_brl)
+    fig = px.bar(
+        summary,
+        x="Tipo",
+        y="Ingressos",
+        template=PLOTLY_TEMPLATE_NAME,
+        color="Tipo",
+        color_discrete_sequence=[PALETTE[0], PALETTE[1]],
+        custom_data=["_label"],
+    )
+    fig.update_traces(hovertemplate="%{x}<br>%{y} ingressos<br>%{customdata[0]}<extra></extra>")
+    fig.update_layout(xaxis_title=None, yaxis_title=None, showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def render_payment_method_chart(dataframe: pd.DataFrame) -> None:
@@ -480,17 +835,60 @@ def render_payment_method_chart(dataframe: pd.DataFrame) -> None:
         st.info("Sem receita aprovada por metodo de pagamento.")
         return
 
-    chart = (
-        alt.Chart(chart_data)
-        .mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5, color=PALETTE[2])
-        .encode(
-            x=alt.X("Metodo de pagamento:N", sort="-y", title=None, axis=alt.Axis(labelAngle=-25)),
-            y=alt.Y("Receita:Q", axis=currency_axis()),
-            tooltip=["Metodo de pagamento:N", alt.Tooltip("Receita:Q", format=",.2f")],
-        )
-        .properties(height=320)
+    chart_data = chart_data.copy()
+    chart_data["_label"] = chart_data["Receita"].apply(format_brl)
+    fig = px.bar(
+        chart_data,
+        x="Metodo de pagamento",
+        y="Receita",
+        template=PLOTLY_TEMPLATE_NAME,
+        color_discrete_sequence=[PALETTE[2]],
+        custom_data=["_label"],
     )
-    st.altair_chart(chart, use_container_width=True)
+    fig.update_traces(hovertemplate="%{x}<br>%{customdata[0]}<extra></extra>")
+    fig.update_layout(xaxis_title=None, yaxis_title=None, showlegend=False, height=320)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_city_table(dataframe: pd.DataFrame) -> None:
+    st.subheader("Consolidado por cidade")
+    table = consolidar_por_cidade(dataframe)
+    if table.empty:
+        st.info("Sem cidades validas para exibir com os filtros atuais.")
+        return
+
+    cidades_sem_capacidade = table.loc[table["Capacidade"].isna(), "Cidade"].tolist()
+    if cidades_sem_capacidade:
+        st.markdown(
+            f'<p class="ts-caption">Sem capacidade cadastrada (ocupacao nao calculada): '
+            f'{", ".join(cidades_sem_capacidade)}</p>',
+            unsafe_allow_html=True,
+        )
+
+    display = table.copy()
+    display["Faixa"] = display["% de ocupacao"].apply(classificar_faixa_ocupacao)
+    display["Valor total vendido"] = display["Valor total vendido"].apply(format_brl)
+    display["Capacidade"] = display["Capacidade"].apply(
+        lambda value: "-" if pd.isna(value) else format_int_ptbr(value)
+    )
+
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "% de ocupacao": st.column_config.ProgressColumn(
+                "% de ocupacao",
+                format="%.1f%%",
+                min_value=0,
+                max_value=100,
+            ),
+            "Total de vendas": st.column_config.NumberColumn(format="%d"),
+            "Total de ingressos": st.column_config.NumberColumn(format="%d"),
+            "Clinicas unicas": st.column_config.NumberColumn(format="%d"),
+            "Cortesias": st.column_config.NumberColumn(format="%d"),
+        },
+    )
 
 
 def render_table(dataframe: pd.DataFrame) -> None:
@@ -513,8 +911,9 @@ def main() -> None:
         page_title="Dashboard Turne Seven",
         layout="wide",
     )
+    render_custom_css()
     st.title("Dashboard Turne Seven")
-    st.caption("Receita, ingressos pagos e cortesias nas cidades da turne")
+    st.caption("Vendas, ingressos, ocupacao e receita nas cidades da turne")
 
     if st.sidebar.button("Atualizar dados", use_container_width=True):
         st.cache_data.clear()
@@ -529,8 +928,15 @@ def main() -> None:
 
         render_metrics(filtered_dataframe)
         st.divider()
-        render_revenue_by_city_chart(filtered_dataframe)
-        render_city_ticket_table(filtered_dataframe)
+        render_city_table(filtered_dataframe)
+        st.divider()
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            render_revenue_by_city_chart(filtered_dataframe)
+            render_sales_over_time_chart(filtered_dataframe)
+        with chart_col2:
+            render_tickets_by_city_chart(filtered_dataframe)
+            render_presale_vs_perpetual_chart(filtered_dataframe)
         render_payment_method_chart(filtered_dataframe)
         render_table(filtered_dataframe)
     except DashboardError as exc:

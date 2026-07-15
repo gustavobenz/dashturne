@@ -2,22 +2,40 @@
 
 Dashboard em Streamlit para ler dados de uma planilha Google Sheets e exibir:
 
-- metricas de receita total, ingressos pagos e cortesias;
-- grafico de receita por cidade;
-- tabela de quantidade de ingressos por cidade (total, pagos e cortesias);
-- grafico de receita por metodo de pagamento;
+- cards de indicadores gerais: total de vendas, total de ingressos, total de clinicas,
+  receita total e cortesias;
+- tabela consolidada por cidade (vendas, ingressos, receita, cortesias, capacidade e %
+  de ocupacao com barra de progresso);
+- graficos (Plotly): receita por cidade, ingressos por cidade, evolucao de vendas no
+  tempo (com marcacao da data de corte pre-venda/perpetuo), pre-venda vs perpetuo e
+  receita por metodo de pagamento;
 - tabela detalhada;
-- filtros na barra lateral (periodo, cidade e metodo de pagamento).
+- filtros na barra lateral (periodo, tipo de venda, cidade e metodo de pagamento).
 
 O dashboard so exibe cidades da lista `ALLOWED_CITY_NAMES` em `app.py` (as cidades oficiais da
 turne). Linhas cuja cidade nao esta nessa lista, ou onde a cidade nao pode ser identificada, sao
 descartadas antes de qualquer metrica, grafico ou tabela.
 
-Um ingresso conta como **pago** (entra em "Ingressos pagos" e nas receitas) quando a linha tem
-`status = approved` **e** `valor > 0`. Uma **cortesia** e qualquer linha com `valor = 0`,
-independente do status. Linhas com outros status (pendente, cancelado etc.) e valor maior que
-zero nao entram em nenhuma metrica de receita/pagos, mas continuam aparecendo na tabela
+Um ingresso conta como **pago** (entra na receita) quando a linha tem `status = approved` **e**
+`valor > 0`. Uma **cortesia** e qualquer linha com `valor = 0`, independente do status. Uma
+**venda valida** (usada em Total de vendas / Total de ingressos / Total de clinicas / tabela por
+cidade) e a uniao de pagas e cortesias; linhas com outros status (pendente, cancelado etc.) e
+valor maior que zero nao entram em nenhuma metrica, mas continuam aparecendo na tabela
 detalhada.
+
+### Regras de negocio adicionais
+
+- **Pre-venda x Perpetuo**: vendas antes de `DATA_CORTE` (06/07/2026) sao Pre-venda; a partir
+  dessa data, inclusive, sao Perpetuo. A constante `DATA_CORTE` fica no topo do `app.py`.
+- **Lancamento duplo**: se a coluna `oferta` terminar em "- LANCAMENTO DUPLO" (comparacao
+  robusta a acento/caixa/espacos via `oferta_e_lancamento_duplo`), a venda vale 2 ingressos.
+  Cada linha continua contando como 1 venda.
+- **Total de clinicas**: a planilha nao tem uma coluna de comprador/clinica hoje, entao esse
+  indicador equivale ao Total de vendas (sem deduplicacao). Ajustar `calcular_indicadores_gerais`
+  e `consolidar_por_cidade` quando essa coluna existir.
+- **Capacidade e ocupacao**: `CAPACIDADES` em `app.py` define a capacidade de 7 cidades. Ocupacao
+  = ingressos da cidade / capacidade x 100 (cortesias contam). Cidades sem capacidade cadastrada
+  aparecem na tabela sem quebrar o calculo, com um aviso discreto na interface.
 
 O app le a aba `Dados` da planilha configurada, valida colunas obrigatorias e usa a Google Sheets API com uma Service Account.
 
@@ -26,7 +44,7 @@ O app le a aba `Dados` da planilha configurada, valida colunas obrigatorias e us
 - Python
 - Streamlit
 - Pandas
-- Altair (graficos)
+- Plotly (graficos)
 - Google Sheets API
 - Render Starter
 

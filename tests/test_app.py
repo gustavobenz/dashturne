@@ -4,12 +4,17 @@ from datetime import date
 import pandas as pd
 
 from app import (
+    DATA_CORTE,
     DashboardError,
-    aggregate_city_ticket_table,
-    build_kpis,
+    calcular_indicadores_gerais,
+    calcular_ingressos,
+    classificar_faixa_ocupacao,
+    classificar_tipo_venda,
     compute_default_date_range,
+    consolidar_por_cidade,
     extract_city_from_item,
     filter_allowed_cities,
+    oferta_e_lancamento_duplo,
     payment_method_totals,
     revenue_by_city,
     values_to_dataframe,
@@ -203,27 +208,35 @@ class DashboardAggregationTest(unittest.TestCase):
     def test_filters_to_allowed_cities_only(self) -> None:
         self.assertEqual({"Sao Paulo", "Rio de Janeiro", "Belo Horizonte"}, set(self.dataframe["cidade"]))
 
-    def test_builds_static_kpis(self) -> None:
+    def test_builds_general_indicators(self) -> None:
         self.assertEqual(
             {
+                "total_vendas": 3,
+                "total_ingressos": 3,
+                "total_clinicas": 3,
                 "receita_total": 300.0,
-                "ingressos_pagos": 2,
                 "cortesias": 1,
             },
-            build_kpis(self.dataframe),
+            calcular_indicadores_gerais(self.dataframe),
         )
 
-    def test_aggregates_city_ticket_table(self) -> None:
-        table = aggregate_city_ticket_table(self.dataframe)
+    def test_consolidates_city_table_and_excludes_cities_without_valid_sales(self) -> None:
+        table = consolidar_por_cidade(self.dataframe).set_index("Cidade")
 
-        self.assertEqual(
-            [
-                {"Cidade": "Rio de Janeiro", "Total": 1, "Pago": 1, "Cortesia": 0},
-                {"Cidade": "Sao Paulo", "Total": 2, "Pago": 1, "Cortesia": 1},
-                {"Cidade": "Belo Horizonte", "Total": 1, "Pago": 0, "Cortesia": 0},
-            ],
-            table.to_dict("records"),
-        )
+        # Belo Horizonte only has a pending (non-approved, non-zero) row, so it has no
+        # valid sale and is dropped entirely from the consolidated table.
+        self.assertNotIn("Belo Horizonte", table.index)
+
+        self.assertEqual(2, table.loc["Sao Paulo", "Total de vendas"])
+        self.assertEqual(2, table.loc["Sao Paulo", "Total de ingressos"])
+        self.assertEqual(1, table.loc["Sao Paulo", "Cortesias"])
+        self.assertEqual(2, table.loc["Sao Paulo", "Clinicas unicas"])
+        self.assertEqual(100.0, table.loc["Sao Paulo", "Valor total vendido"])
+
+        self.assertEqual(1, table.loc["Rio de Janeiro", "Total de vendas"])
+        self.assertEqual(1, table.loc["Rio de Janeiro", "Total de ingressos"])
+        self.assertEqual(0, table.loc["Rio de Janeiro", "Cortesias"])
+        self.assertEqual(200.0, table.loc["Rio de Janeiro", "Valor total vendido"])
 
     def test_ranks_revenue_by_city_descending(self) -> None:
         ranking = revenue_by_city(self.dataframe)
@@ -236,6 +249,115 @@ class DashboardAggregationTest(unittest.TestCase):
 
         self.assertEqual(["pix", "credit_card"], list(ranking["Metodo de pagamento"]))
         self.assertEqual([200.0, 100.0], list(ranking["Receita"]))
+
+
+class OfertaLancamentoDuploTest(unittest.TestCase):
+    def test_matches_exact_suffix(self) -> None:
+        self.assertTrue(oferta_e_lancamento_duplo("Ingresso VIP - LANCAMENTO DUPLO"))
+
+    def test_matches_with_accent_and_extra_spacing(self) -> None:
+        self.assertTrue(oferta_e_lancamento_duplo("  Ingresso VIP  -   LANÇAMENTO   DUPLO  "))
+
+    def test_matches_regardless_of_case(self) -> None:
+        self.assertTrue(oferta_e_lancamento_duplo("ingresso vip - lancamento duplo"))
+
+    def test_does_not_match_without_suffix(self) -> None:
+        self.assertFalse(oferta_e_lancamento_duplo("Ingresso VIP"))
+
+    def test_does_not_match_suffix_in_the_middle(self) -> None:
+        self.assertFalse(oferta_e_lancamento_duplo("LANCAMENTO DUPLO - Ingresso VIP"))
+
+    def test_handles_empty_and_none(self) -> None:
+        self.assertFalse(oferta_e_lancamento_duplo(""))
+        self.assertFalse(oferta_e_lancamento_duplo(None))
+
+
+class ClassificarTipoVendaTest(unittest.TestCase):
+    def _dataframe_with_date(self, data_str: str) -> pd.DataFrame:
+        values = [
+            ["Data de criacao", "Descricao", "Valor"],
+            [data_str, "Pedido", "10,00"],
+        ]
+        return values_to_dataframe(values)
+
+    def test_day_before_cutoff_is_pre_venda(self) -> None:
+        dataframe = self._dataframe_with_date("05/07/2026")
+
+        self.assertEqual("Pre-venda", classificar_tipo_venda(dataframe).iloc[0])
+
+    def test_cutoff_day_itself_is_perpetuo(self) -> None:
+        dataframe = self._dataframe_with_date("06/07/2026")
+
+        self.assertEqual(date(2026, 7, 6), DATA_CORTE)
+        self.assertEqual("Perpetuo", classificar_tipo_venda(dataframe).iloc[0])
+
+    def test_day_after_cutoff_is_perpetuo(self) -> None:
+        dataframe = self._dataframe_with_date("07/07/2026")
+
+        self.assertEqual("Perpetuo", classificar_tipo_venda(dataframe).iloc[0])
+
+
+class CalcularIngressosTest(unittest.TestCase):
+    def test_double_launch_offer_counts_as_two_tickets_but_one_sale(self) -> None:
+        values = [
+            ["Data de criacao", "Descricao", "Valor", "Status", "Oferta"],
+            ["02/07/2026", "Pedido 1", "100,00", "approved", "VIP - LANCAMENTO DUPLO"],
+        ]
+        dataframe = values_to_dataframe(values)
+
+        self.assertEqual([2], list(calcular_ingressos(dataframe)))
+        self.assertEqual(1, len(dataframe))
+
+    def test_regular_offer_counts_as_one_ticket(self) -> None:
+        values = [
+            ["Data de criacao", "Descricao", "Valor", "Status", "Oferta"],
+            ["02/07/2026", "Pedido 1", "100,00", "approved", "VIP"],
+        ]
+        dataframe = values_to_dataframe(values)
+
+        self.assertEqual([1], list(calcular_ingressos(dataframe)))
+
+    def test_invalid_sale_counts_zero_tickets(self) -> None:
+        values = [
+            ["Data de criacao", "Descricao", "Valor", "Status", "Oferta"],
+            ["02/07/2026", "Pedido 1", "100,00", "pending", "VIP - LANCAMENTO DUPLO"],
+        ]
+        dataframe = values_to_dataframe(values)
+
+        self.assertEqual([0], list(calcular_ingressos(dataframe)))
+
+
+class ConsolidarPorCidadeOcupacaoTest(unittest.TestCase):
+    def _build_dataframe(self, cidade: str, quantidade_ingressos: int) -> pd.DataFrame:
+        rows = [
+            [
+                "02/07/2026",
+                f"Pedido {i}",
+                "50,00",
+                "approved",
+                f"TURNE SEVEN {cidade.upper()}",
+            ]
+            for i in range(quantidade_ingressos)
+        ]
+        values = [["Data de criacao", "Descricao", "Valor", "Status", "Item"], *rows]
+        return filter_allowed_cities(values_to_dataframe(values))
+
+    def test_maringa_occupancy_matches_expected_percentage(self) -> None:
+        dataframe = self._build_dataframe("MARINGA", 25)
+
+        table = consolidar_por_cidade(dataframe)
+
+        self.assertEqual(50.0, table.loc[table["Cidade"] == "Maringa", "% de ocupacao"].iloc[0])
+
+    def test_city_without_registered_capacity_does_not_break_and_shows_dash(self) -> None:
+        dataframe = self._build_dataframe("BELO HORIZONTE", 5)
+
+        table = consolidar_por_cidade(dataframe)
+        row = table.loc[table["Cidade"] == "Belo Horizonte"].iloc[0]
+
+        self.assertTrue(pd.isna(row["Capacidade"]))
+        self.assertIsNone(row["% de ocupacao"])
+        self.assertEqual("-", classificar_faixa_ocupacao(row["% de ocupacao"]))
 
 
 if __name__ == "__main__":
