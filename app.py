@@ -350,7 +350,7 @@ def aggregate_city_ticket_table(dataframe: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "Cidade": city,
-                "Total": int(len(group)),
+                "Total": int(paid_mask.sum() + is_courtesy_ticket(group).sum()),
                 "Pago": int(paid_mask.sum()),
                 "Cortesia": int(is_courtesy_ticket(group).sum()),
                 "_receita": float(group.loc[paid_mask, "valor"].sum(skipna=True)),
