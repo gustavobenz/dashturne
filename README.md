@@ -99,6 +99,7 @@ O app exige estas variaveis de ambiente:
 GOOGLE_SERVICE_ACCOUNT_JSON
 GOOGLE_SPREADSHEET_ID
 GOOGLE_SHEET_NAME
+DASHBOARD_PASSWORD
 ```
 
 `GOOGLE_SERVICE_ACCOUNT_JSON` deve conter o JSON completo da chave da Service Account.
@@ -106,6 +107,9 @@ GOOGLE_SHEET_NAME
 `GOOGLE_SPREADSHEET_ID` deve conter o ID da planilha.
 
 `GOOGLE_SHEET_NAME` define a aba lida pelo app. O padrao e `Dados`, mas esta planilha usa `Sheet1`.
+
+`DASHBOARD_PASSWORD` define a senha compartilhada exigida para acessar o dashboard. Sem essa
+variavel configurada, o app se recusa a exibir qualquer dado.
 
 Exemplo de URL:
 
@@ -131,6 +135,10 @@ Nunca commite arquivos de secrets do Streamlit com credenciais.
 
 As credenciais devem ficar apenas em variaveis de ambiente no ambiente local ou no Render.
 
+`DASHBOARD_PASSWORD` e uma senha unica compartilhada, nao um sistema de login por usuario:
+nao ha bloqueio por tentativas nem identificacao de quem acessou. E uma barreira basica contra
+acesso casual, nao um controle de acesso completo.
+
 ## Executar localmente
 
 No Windows, dentro da pasta do projeto:
@@ -155,7 +163,7 @@ Se voce possui o arquivo local `google-credentials.json` na pasta do projeto, us
 .\run-local.ps1
 ```
 
-O script define `GOOGLE_SPREADSHEET_ID` com `1ogY8-8jjibTWu1PKcPyKHofoOEL9Hn4RLJUssG2IXao`, define `GOOGLE_SHEET_NAME` como `Sheet1`, le o conteudo local de `google-credentials.json` e inicia o Streamlit. O arquivo `google-credentials.json` esta no `.gitignore` e nao deve ser commitado.
+O script define `GOOGLE_SPREADSHEET_ID` com `1ogY8-8jjibTWu1PKcPyKHofoOEL9Hn4RLJUssG2IXao`, define `GOOGLE_SHEET_NAME` como `Sheet1`, define `DASHBOARD_PASSWORD` com uma senha fixa de uso local, le o conteudo local de `google-credentials.json` e inicia o Streamlit. O arquivo `google-credentials.json` esta no `.gitignore` e nao deve ser commitado.
 
 Exemplo manual no PowerShell:
 
@@ -163,6 +171,7 @@ Exemplo manual no PowerShell:
 $env:GOOGLE_SPREADSHEET_ID="1ogY8-8jjibTWu1PKcPyKHofoOEL9Hn4RLJUssG2IXao"
 $env:GOOGLE_SHEET_NAME="Sheet1"
 $env:GOOGLE_SERVICE_ACCOUNT_JSON = Get-Content -Raw .\google-credentials.json
+$env:DASHBOARD_PASSWORD="senha-local-dev"
 py -m streamlit run app.py
 ```
 
@@ -263,8 +272,9 @@ Nao envie arquivos com credenciais para o GitHub.
 6. Adicione a variavel `GOOGLE_SHEET_NAME` com o valor `Sheet1`.
 7. Adicione a variavel `GOOGLE_SERVICE_ACCOUNT_JSON`.
 8. Cole o JSON completo da Service Account como valor.
-9. Salve as alteracoes.
-10. Faca um novo deploy para aplicar as variaveis.
+9. Adicione a variavel `DASHBOARD_PASSWORD` com a senha que sera exigida para acessar o dashboard.
+10. Salve as alteracoes.
+11. Faca um novo deploy para aplicar as variaveis.
 
 O Render deve armazenar esses valores como Environment Variables, nao como arquivos no repositorio.
 
@@ -295,6 +305,7 @@ streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headl
 GOOGLE_SERVICE_ACCOUNT_JSON
 GOOGLE_SPREADSHEET_ID
 GOOGLE_SHEET_NAME
+DASHBOARD_PASSWORD
 ```
 
 11. Clique em `Create Web Service`.

@@ -12,3 +12,5 @@
         sync: false
       - key: GOOGLE_SHEET_NAME
         value: Sheet1
+      - key: DASHBOARD_PASSWORD
+        sync: false

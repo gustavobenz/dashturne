@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import unicodedata
 from datetime import date
 from typing import Any
@@ -22,6 +23,7 @@ from googleapiclient.errors import HttpError
 
 DEFAULT_SPREADSHEET_ID = "1ogY8-8jjibTWu1PKcPyKHofoOEL9Hn4RLJUssG2IXao"
 DEFAULT_SHEET_NAME = "Sheet1"
+DASHBOARD_PASSWORD_ENV_VAR = "DASHBOARD_PASSWORD"
 REQUIRED_COLUMNS = {"data_de_criacao", "descricao", "valor"}
 OPTIONAL_FILTER_COLUMNS = ("cidade", "metodo_pagamento")
 SCOPES = ("https://www.googleapis.com/auth/spreadsheets.readonly",)
@@ -133,6 +135,11 @@ def get_service_account_json() -> str:
         "Variavel de ambiente obrigatoria ausente: GOOGLE_SERVICE_ACCOUNT_JSON. "
         "Para rodar localmente, mantenha google-credentials.json na pasta do projeto."
     )
+
+
+def check_password(candidate: str, expected: str) -> bool:
+    """Constant-time comparison so response timing does not leak the password."""
+    return secrets.compare_digest(candidate, expected)
 
 
 def load_service_account_credentials(credentials_json: str) -> Credentials:
@@ -906,11 +913,38 @@ def load_dataframe() -> pd.DataFrame:
     return values_to_dataframe(values)
 
 
+def require_authentication() -> None:
+    if st.session_state.get("authenticated", False):
+        return
+
+    try:
+        expected_password = get_required_env(DASHBOARD_PASSWORD_ENV_VAR)
+    except DashboardError as exc:
+        st.error(str(exc))
+        st.stop()
+        return
+
+    st.caption("Acesso restrito")
+    password = st.text_input("Senha", type="password", key="password_input")
+    submitted = st.button("Entrar")
+
+    if submitted:
+        if check_password(password, expected_password):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Senha incorreta.")
+
+    if not st.session_state.get("authenticated", False):
+        st.stop()
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Dashboard Turne Seven",
         layout="wide",
     )
+    require_authentication()
     render_custom_css()
     st.title("Dashboard Turne Seven")
     st.caption("Vendas, ingressos, ocupacao e receita nas cidades da turne")

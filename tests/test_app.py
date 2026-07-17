@@ -8,6 +8,7 @@ from app import (
     DashboardError,
     calcular_indicadores_gerais,
     calcular_ingressos,
+    check_password,
     classificar_faixa_ocupacao,
     classificar_tipo_venda,
     compute_default_date_range,
@@ -358,6 +359,20 @@ class ConsolidarPorCidadeOcupacaoTest(unittest.TestCase):
         self.assertTrue(pd.isna(row["Capacidade"]))
         self.assertIsNone(row["% de ocupacao"])
         self.assertEqual("-", classificar_faixa_ocupacao(row["% de ocupacao"]))
+
+
+class CheckPasswordTest(unittest.TestCase):
+    def test_returns_true_for_matching_password(self) -> None:
+        self.assertTrue(check_password("segredo123", "segredo123"))
+
+    def test_returns_false_for_non_matching_password(self) -> None:
+        self.assertFalse(check_password("errada", "segredo123"))
+
+    def test_returns_false_for_empty_candidate(self) -> None:
+        self.assertFalse(check_password("", "segredo123"))
+
+    def test_is_case_sensitive(self) -> None:
+        self.assertFalse(check_password("Segredo123", "segredo123"))
 
 
 if __name__ == "__main__":
