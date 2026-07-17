@@ -15,6 +15,7 @@ from app import (
     consolidar_por_cidade,
     extract_city_from_item,
     filter_allowed_cities,
+    leads_quentes,
     oferta_e_lancamento_duplo,
     payment_method_totals,
     revenue_by_city,
@@ -359,6 +360,66 @@ class ConsolidarPorCidadeOcupacaoTest(unittest.TestCase):
         self.assertTrue(pd.isna(row["Capacidade"]))
         self.assertIsNone(row["% de ocupacao"])
         self.assertEqual("-", classificar_faixa_ocupacao(row["% de ocupacao"]))
+
+
+class LeadsQuentesTest(unittest.TestCase):
+    HEADERS = ["Data de criacao", "Descricao", "Valor", "Status", "Item", "Email"]
+
+    def _row(self, data: str, valor: str, status: str, email: str) -> list[str]:
+        return [data, "Pedido", valor, status, "TURNE SEVEN SAO PAULO", email]
+
+    def test_abandoned_without_matching_approved_email_appears(self) -> None:
+        values = [
+            self.HEADERS,
+            self._row("02/07/2026", "99,90", "abandoned", "lead@example.com"),
+        ]
+
+        table = leads_quentes(values_to_dataframe(values))
+
+        self.assertEqual(["lead@example.com"], table["Email"].tolist())
+
+    def test_abandoned_with_matching_approved_email_is_excluded(self) -> None:
+        values = [
+            self.HEADERS,
+            self._row("02/07/2026", "99,90", "abandoned", "Lead@Example.com "),
+            self._row("03/07/2026", "150,00", "approved", " lead@example.com"),
+        ]
+
+        table = leads_quentes(values_to_dataframe(values))
+
+        self.assertTrue(table.empty)
+
+    def test_abandoned_with_blank_email_is_excluded(self) -> None:
+        values = [
+            self.HEADERS,
+            self._row("02/07/2026", "99,90", "abandoned", ""),
+        ]
+
+        table = leads_quentes(values_to_dataframe(values))
+
+        self.assertTrue(table.empty)
+
+    def test_duplicate_abandoned_same_email_keeps_most_recent_only(self) -> None:
+        values = [
+            self.HEADERS,
+            self._row("01/07/2026", "99,90", "abandoned", "lead@example.com"),
+            self._row("05/07/2026", "99,90", "abandoned", "lead@example.com"),
+        ]
+
+        table = leads_quentes(values_to_dataframe(values))
+
+        self.assertEqual(1, len(table))
+        self.assertEqual(date(2026, 7, 5), table.loc[0, "Data de criacao"].date())
+
+    def test_missing_email_column_returns_empty_dataframe_without_error(self) -> None:
+        values = [
+            ["Data de criacao", "Descricao", "Valor", "Status", "Item"],
+            ["02/07/2026", "Pedido", "99,90", "abandoned", "TURNE SEVEN SAO PAULO"],
+        ]
+
+        table = leads_quentes(values_to_dataframe(values))
+
+        self.assertTrue(table.empty)
 
 
 class CheckPasswordTest(unittest.TestCase):

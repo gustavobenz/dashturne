@@ -30,6 +30,8 @@ SCOPES = ("https://www.googleapis.com/auth/spreadsheets.readonly",)
 PRESET_FILTER_START_DATE = date(2026, 7, 1)
 STATUS_COLUMN = "status"
 APPROVED_STATUS = "approved"
+ABANDONED_STATUS = "abandoned"
+EMAIL_COLUMN = "email"
 CITY_SOURCE_COLUMN = "item"
 OFERTA_COLUMN = "oferta"
 PALETTE = ["#2563eb", "#16a34a", "#f97316", "#9333ea", "#0f766e", "#e11d48"]
@@ -102,6 +104,8 @@ CONSOLIDATED_CITY_COLUMNS = [
     "Capacidade",
     "% de ocupacao",
 ]
+
+LEADS_QUENTES_COLUMNS = ["Email", "Cidade", "Data de criacao", "Descricao", "Valor"]
 
 PLOTLY_TEMPLATE_NAME = "turne_seven"
 
@@ -344,6 +348,22 @@ def status_is_approved(dataframe: pd.DataFrame) -> pd.Series:
     )
 
 
+def status_is_abandoned(dataframe: pd.DataFrame) -> pd.Series:
+    if STATUS_COLUMN not in dataframe.columns:
+        return pd.Series(False, index=dataframe.index)
+
+    return (
+        dataframe[STATUS_COLUMN].fillna("").astype(str).str.strip().str.lower()
+        .eq(ABANDONED_STATUS)
+    )
+
+
+def normalize_email(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip().lower()
+
+
 def is_paid_ticket(dataframe: pd.DataFrame) -> pd.Series:
     return status_is_approved(dataframe) & dataframe["valor"].fillna(0).gt(0)
 
@@ -450,6 +470,42 @@ def consolidar_por_cidade(dataframe: pd.DataFrame) -> pd.DataFrame:
     return table.sort_values(
         "% de ocupacao", ascending=False, na_position="last", kind="stable"
     ).reset_index(drop=True)
+
+
+def leads_quentes(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Carrinhos abandonados cujo email nunca aparece em uma venda approved."""
+    if EMAIL_COLUMN not in dataframe.columns:
+        return pd.DataFrame(columns=LEADS_QUENTES_COLUMNS)
+
+    abandonados = dataframe[status_is_abandoned(dataframe)].copy()
+    abandonados["email_normalizado"] = abandonados[EMAIL_COLUMN].apply(normalize_email)
+    abandonados = abandonados[abandonados["email_normalizado"] != ""]
+    if abandonados.empty:
+        return pd.DataFrame(columns=LEADS_QUENTES_COLUMNS)
+
+    emails_convertidos = set(
+        dataframe.loc[status_is_approved(dataframe), EMAIL_COLUMN]
+        .apply(normalize_email)
+    ) - {""}
+
+    abandonados = abandonados[~abandonados["email_normalizado"].isin(emails_convertidos)]
+    if abandonados.empty:
+        return pd.DataFrame(columns=LEADS_QUENTES_COLUMNS)
+
+    abandonados = abandonados.sort_values("data", ascending=False, na_position="last")
+    abandonados = abandonados.drop_duplicates(subset="email_normalizado", keep="first")
+
+    table = pd.DataFrame(
+        {
+            "Email": abandonados[EMAIL_COLUMN],
+            "Cidade": abandonados.get("cidade"),
+            "Data de criacao": abandonados["data"],
+            "Descricao": abandonados.get("descricao"),
+            "Valor": abandonados["valor"],
+        },
+        columns=LEADS_QUENTES_COLUMNS,
+    )
+    return table.reset_index(drop=True)
 
 
 def revenue_by_city(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -905,6 +961,22 @@ def render_table(dataframe: pd.DataFrame) -> None:
     st.dataframe(display_dataframe, use_container_width=True, hide_index=True)
 
 
+def render_leads_quentes_table(dataframe: pd.DataFrame) -> None:
+    if EMAIL_COLUMN not in dataframe.columns:
+        return
+
+    st.subheader("Leads quentes (carrinho abandonado sem conversao)")
+    table = leads_quentes(dataframe)
+    if table.empty:
+        st.info("Nenhum lead quente encontrado com os filtros atuais.")
+        return
+
+    display = table.copy()
+    display["Data de criacao"] = display["Data de criacao"].dt.strftime("%d/%m/%Y")
+    display["Valor"] = display["Valor"].apply(format_brl)
+    st.dataframe(display, use_container_width=True, hide_index=True)
+
+
 def load_dataframe() -> pd.DataFrame:
     spreadsheet_id = get_optional_env("GOOGLE_SPREADSHEET_ID", DEFAULT_SPREADSHEET_ID)
     credentials_json = get_service_account_json()
@@ -973,6 +1045,8 @@ def main() -> None:
             render_presale_vs_perpetual_chart(filtered_dataframe)
         render_payment_method_chart(filtered_dataframe)
         render_table(filtered_dataframe)
+        st.divider()
+        render_leads_quentes_table(filtered_dataframe)
     except DashboardError as exc:
         st.error(str(exc))
         st.stop()

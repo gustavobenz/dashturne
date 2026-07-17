@@ -72,6 +72,7 @@ oferta
 metodo_pagamento
 cidade
 status
+email
 ```
 
 Observacoes:
@@ -90,6 +91,11 @@ Observacoes:
 - Uma cortesia e qualquer linha com `valor` igual a `0`, independente do `status`.
 - Um ingresso so entra nas metricas/graficos de receita quando `status = approved` **e**
   `valor > 0`.
+- **Leads quentes**: se a coluna `email` existir, o dashboard mostra uma tabela com carrinhos
+  `status = abandoned` cujo email **nunca** aparece em uma venda `approved` (comparacao
+  ignora maiusculas/minusculas e espacos). Cada email aparece uma unica vez, com a tentativa
+  de abandono mais recente. Linhas `abandoned` sem email sao ignoradas. Sem a coluna `email`,
+  essa secao simplesmente nao aparece.
 
 ## Variaveis de ambiente
 
