@@ -73,6 +73,8 @@ metodo_pagamento
 cidade
 status
 email
+nome
+telefone
 ```
 
 Observacoes:
@@ -95,7 +97,9 @@ Observacoes:
   `status = abandoned` cujo email **nunca** aparece em uma venda `approved` (comparacao
   ignora maiusculas/minusculas e espacos). Cada email aparece uma unica vez, com a tentativa
   de abandono mais recente. Linhas `abandoned` sem email sao ignoradas. Sem a coluna `email`,
-  essa secao simplesmente nao aparece.
+  essa secao simplesmente nao aparece. Se as colunas `nome` e/ou `telefone` existirem, seus
+  valores aparecem como colunas extras nessa tabela, para facilitar o contato do time de
+  vendas; sem elas, a tabela continua funcionando normalmente, so sem esses dados.
 
 ## Variaveis de ambiente
 

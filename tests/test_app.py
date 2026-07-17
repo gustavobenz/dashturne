@@ -363,10 +363,27 @@ class ConsolidarPorCidadeOcupacaoTest(unittest.TestCase):
 
 
 class LeadsQuentesTest(unittest.TestCase):
-    HEADERS = ["Data de criacao", "Descricao", "Valor", "Status", "Item", "Email"]
+    HEADERS = [
+        "Data de criacao",
+        "Descricao",
+        "Valor",
+        "Status",
+        "Item",
+        "Email",
+        "Nome",
+        "Telefone",
+    ]
 
-    def _row(self, data: str, valor: str, status: str, email: str) -> list[str]:
-        return [data, "Pedido", valor, status, "TURNE SEVEN SAO PAULO", email]
+    def _row(
+        self,
+        data: str,
+        valor: str,
+        status: str,
+        email: str,
+        nome: str = "",
+        telefone: str = "",
+    ) -> list[str]:
+        return [data, "Pedido", valor, status, "TURNE SEVEN SAO PAULO", email, nome, telefone]
 
     def test_abandoned_without_matching_approved_email_appears(self) -> None:
         values = [
@@ -410,6 +427,36 @@ class LeadsQuentesTest(unittest.TestCase):
 
         self.assertEqual(1, len(table))
         self.assertEqual(date(2026, 7, 5), table.loc[0, "Data de criacao"].date())
+
+    def test_includes_name_and_phone_when_present(self) -> None:
+        values = [
+            self.HEADERS,
+            self._row(
+                "02/07/2026",
+                "99,90",
+                "abandoned",
+                "lead@example.com",
+                nome="Maria Silva",
+                telefone="11999998888",
+            ),
+        ]
+
+        table = leads_quentes(values_to_dataframe(values))
+
+        self.assertEqual(["Maria Silva"], table["Nome"].tolist())
+        self.assertEqual(["11999998888"], table["Telefone"].tolist())
+
+    def test_missing_name_and_phone_columns_does_not_break_table(self) -> None:
+        values = [
+            ["Data de criacao", "Descricao", "Valor", "Status", "Item", "Email"],
+            ["02/07/2026", "Pedido", "99,90", "abandoned", "TURNE SEVEN SAO PAULO", "lead@example.com"],
+        ]
+
+        table = leads_quentes(values_to_dataframe(values))
+
+        self.assertEqual(["lead@example.com"], table["Email"].tolist())
+        self.assertTrue(pd.isna(table.loc[0, "Nome"]))
+        self.assertTrue(pd.isna(table.loc[0, "Telefone"]))
 
     def test_missing_email_column_returns_empty_dataframe_without_error(self) -> None:
         values = [

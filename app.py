@@ -32,6 +32,8 @@ STATUS_COLUMN = "status"
 APPROVED_STATUS = "approved"
 ABANDONED_STATUS = "abandoned"
 EMAIL_COLUMN = "email"
+NAME_COLUMN = "nome"
+PHONE_COLUMN = "telefone"
 CITY_SOURCE_COLUMN = "item"
 OFERTA_COLUMN = "oferta"
 PALETTE = ["#2563eb", "#16a34a", "#f97316", "#9333ea", "#0f766e", "#e11d48"]
@@ -105,7 +107,15 @@ CONSOLIDATED_CITY_COLUMNS = [
     "% de ocupacao",
 ]
 
-LEADS_QUENTES_COLUMNS = ["Email", "Cidade", "Data de criacao", "Descricao", "Valor"]
+LEADS_QUENTES_COLUMNS = [
+    "Nome",
+    "Email",
+    "Telefone",
+    "Cidade",
+    "Data de criacao",
+    "Descricao",
+    "Valor",
+]
 
 PLOTLY_TEMPLATE_NAME = "turne_seven"
 
@@ -497,7 +507,9 @@ def leads_quentes(dataframe: pd.DataFrame) -> pd.DataFrame:
 
     table = pd.DataFrame(
         {
+            "Nome": abandonados.get(NAME_COLUMN),
             "Email": abandonados[EMAIL_COLUMN],
+            "Telefone": abandonados.get(PHONE_COLUMN),
             "Cidade": abandonados.get("cidade"),
             "Data de criacao": abandonados["data"],
             "Descricao": abandonados.get("descricao"),
